@@ -1,0 +1,122 @@
+# AgentGateway — Build Checklist
+
+Derived from [ROADMAP.md](ROADMAP.md). Design rationale lives in [WHITEPAPER.md](WHITEPAPER.md).
+
+## Phase 0 — Repo Scaffold
+
+- [x] Create the monorepo structure
+- [x] Get `docker-compose up` to succeed
+- [x] Apply the Prisma migration
+- [x] Confirm `/health` returns 200
+
+## Phase 1 — Foundation & Infrastructure Setup
+
+- [ ] Scaffold the repo with a strict TypeScript config
+- [ ] Configure ESLint and Prettier
+- [ ] Write `docker-compose.yml` bringing up Postgres + Redis + the app in one command
+- [ ] Build the environment config module
+- [ ] Commit `.env.example` and keep secrets out of version control
+- [ ] Implement the `/health` endpoint checking DB and Redis connectivity
+- [ ] Wire in Razorpay test-mode keys
+- [ ] Write a manual script that creates one test Order and confirms the SDK round-trips correctly
+
+**Validation:**
+
+- [ ] `docker-compose up` succeeds from a clean clone
+- [ ] `/health` returns 200
+- [ ] A test Order appears in the Razorpay test-mode dashboard
+
+## Phase 2 — Database Layer, Policy Engine & Razorpay Core
+
+- [x] Write migrations for all eight tables, with indexes and constraints as specified
+- [x] Implement `PolicyEngine.checkSpendCap()` using the row-locked transactional check from §3.5
+- [x] Write unit tests covering the concurrent-request race explicitly (two simultaneous calls, assert only one succeeds)
+- [ ] Implement `RazorpayClient.createOrder()`, `.createPaymentLink()`, `.capturePayment()` against test-mode credentials
+- [x] Build the webhook listener with raw-body capture + HMAC verification (§3.4)
+- [x] Store every webhook event in `webhook_events` regardless of validity — log and reject invalid ones rather than silently dropping them
+
+**Validation:**
+
+- [x] A concurrency test proves the spend-cap check cannot be raced
+- [ ] A manually-triggered Razorpay test webhook is received, verified, and persisted correctly
+- [x] A deliberately tampered signature is rejected and logged
+
+## Phase 3 — Protocol Adapters & Cryptographic Engine
+
+- [ ] Build `x402Adapter` to issue the `402` challenge
+- [ ] Validate retried x402 requests against the original reference and enforce one-time redemption
+- [ ] Build `ap2Adapter` to canonicalize and verify `IntentMandate` signatures
+- [ ] Enforce nonce uniqueness in `ap2Adapter` across Redis and the DB
+- [ ] Map validated AP2 mandates to `NormalizedPaymentRequest`
+- [ ] Build `fallbackAdapter` with Payment Link generation + the human-confirmation webhook path
+- [ ] Build the protocol router that inspects request shape/headers and dispatches to the correct adapter, defaulting to `fallbackAdapter` for anything unrecognized
+
+**Validation:**
+
+- [ ] A tampered AP2 signature is rejected pre-database
+- [ ] A replayed nonce is rejected by Redis on the fast path
+- [ ] In a forced-Redis-outage test, a replayed nonce is rejected by the Postgres unique constraint as a fallback
+- [ ] An x402 flow completes end-to-end against test-mode settlement
+
+## Phase 4 — Reference AI Agent Client
+
+- [ ] Build a CLI agent invocable as `--protocol=x402` and `--protocol=ap2`, both purchasing the same test cart against the local gateway
+- [ ] Have the agent generate its own Ed25519 keypair for the AP2 run
+- [ ] Write a setup script that registers the agent's public key (simulating merchant-side agent onboarding)
+- [ ] Log the full request/response trace to a JSON file for the Phase 5 tester panel and the demo video
+
+**Validation:**
+
+- [ ] Both protocol runs, against the identical cart and identical merchant, terminate in the same `razorpay_orders` row shape underneath
+
+## Phase 5 — Merchant Dashboard & Interactive Protocol Tester
+
+- [ ] Build the policy console for spend caps, blocked categories, and enabled protocols per merchant, writing to `/v1/merchant/policy`
+- [ ] Build the live transaction/audit feed over SSE, showing protocol origin, status, and a link into each request's full audit trail
+- [ ] Build the protocol tester panel: paste or trigger a raw x402/AP2 request from the browser and render the adapter's validate → normalize → settle → receipt steps side by side in real time
+- [ ] Build the agent management view with a one-click revoke button (`POST /v1/merchant/agents/:id/revoke`)
+- [ ] Demonstrate that a revoked agent's next request is rejected immediately
+
+**Validation:**
+
+- [ ] Revoking an agent mid-session blocks its next request
+- [ ] The audit trail for a rejected mandate is fully readable by a non-technical viewer without needing to read logs
+
+## Phase 6 — End-to-End Integration, Chaos Testing & Submission Prep
+
+- [ ] Script and record chaos scenario 1: replay a captured AP2 mandate — must be rejected
+- [ ] Script and record chaos scenario 2: fire 20 concurrent spend-cap-adjacent requests from the same agent — exactly the correct number succeed, verified against the cap
+- [ ] Script and record chaos scenario 3: deliver a webhook with a tampered signature — rejected and logged, no state change
+- [ ] Script and record chaos scenario 4: deliver the same legitimate webhook twice — processed once
+- [ ] Write a load/latency profiling script hitting `/v1/ap2/mandates` at increasing concurrency, reporting p50/p95 latency
+- [ ] Write the README with the architecture diagram, setup instructions, and an explicit "known limitations" section (§5.3)
+- [ ] Write the 5-minute demo video script: (1) the problem in 30 seconds, (2) the trust-boundary rule stated on camera, (3) both protocol flows completing live, (4) the spend-cap breach handled gracefully on camera, (5) the audit trail for that exact failure shown in the dashboard
+
+**Validation:**
+
+- [ ] Every chaos scenario has a corresponding, visible entry in the audit trail
+- [ ] The video shows one real failure end-to-end, not just a success path
+
+## Notes
+
+- [ ] (add blockers / decisions here as you go)
+
+**Phase 2 — left unchecked**
+
+- `RazorpayClient.createOrder()/.createPaymentLink()/.capturePayment()` — implemented and
+  unit-tested for exact request shape, but NOT verified against live test-mode
+  credentials: `.env` still holds placeholder `rzp_test_xxxx` keys. Fill in real keys and
+  run `npm run razorpay:smoke --workspace=gateway`, then re-run
+  `npm run webhook:test --workspace=gateway` (it creates a genuine Order when the keys
+  are real).
+- "A manually-triggered Razorpay test webhook is received, verified, and persisted
+  correctly" — verified only with a **locally-signed** Razorpay-shaped delivery, not one
+  sent from the Razorpay dashboard's webhook test-send. That needs real credentials plus
+  a publicly reachable URL (ngrok/tunnel) for the gateway.
+
+**Phase 2 — decisions**
+
+- §3.5's pseudo-SQL says "ROLLBACK" on a spend-cap breach, but §3.5 step 4 requires the
+  rejection be written to `audit_log`. A rollback would discard that audit row, so a
+  breach COMMITS the audit row and leaves `spent_paise` untouched — identical to a
+  rollback for the money, and the only way to satisfy both steps atomically.

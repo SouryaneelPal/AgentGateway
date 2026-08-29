@@ -1,0 +1,85 @@
+# AgentGateway — local development stack (§2.1 State Layer + Gateway service).
+#
+# Explicit project name: this repo's directory contains spaces, which Compose would
+# otherwise mangle when deriving a default project name from the folder.
+name: agentgateway
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: agentgateway-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agentgateway
+      POSTGRES_PASSWORD: agentgateway
+      POSTGRES_DB: agentgateway
+      # Deterministic initdb settings so a clean clone always builds the same DB.
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U agentgateway -d agentgateway']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: agentgateway-redis
+    restart: unless-stopped
+    # appendonly keeps nonce keys across a restart; they are TTL'd anyway (§3.2).
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  gateway:
+    build:
+      context: .
+      dockerfile: packages/gateway/Dockerfile
+    container_name: agentgateway-gateway
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      # Container binds 3001; the host `npm run dev` binds PORT from .env (3000),
+      # so both can run at once without fighting over a port.
+      PORT: 3001
+      DATABASE_URL: postgresql://agentgateway:agentgateway@postgres:5432/agentgateway?schema=public
+      REDIS_URL: redis://redis:6379
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:?set RAZORPAY_KEY_ID in .env}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:?set RAZORPAY_KEY_SECRET in .env}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:?set RAZORPAY_WEBHOOK_SECRET in .env}
+    ports:
+      - '3001:3001'
+    healthcheck:
+      # /health is 200 only when BOTH Postgres and Redis answer (Phase 1 deliverable).
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3001/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+volumes:
+  postgres-data:
+  redis-data:

@@ -1,0 +1,198 @@
+// AgentGateway — Prisma schema.
+//
+// This is a 1:1 transcription of the PostgreSQL DDL in WHITEPAPER.md §2.3.
+// Table and column names are pinned with @map/@@map so the physical schema matches
+// the whitepaper exactly; the Prisma-side names are camelCase only for ergonomics.
+//
+// ===========================================================================
+// !! MIGRATION SAFETY — READ BEFORE REGENERATING A MIGRATION FROM THIS SCHEMA !!
+//
+// Two parts of the §2.3 contract are NOT expressed in this file, because Prisma's
+// schema language cannot express them and its generator will not emit them:
+//
+//   1. The six CHECK constraints
+//        agent_identities.protocol, agent_identities.trust_level,
+//        payment_requests.normalized_amount_paise, payment_requests.status,
+//        razorpay_orders.status, audit_log.actor_type
+//      Prisma has no CHECK support at all. They appear only as `///` doc comments
+//      on the models below, which are documentation and enforce nothing.
+//
+//   2. merchants.enabled_protocols NOT NULL
+//      Prisma does not emit NOT NULL for scalar list columns, so a regenerated
+//      migration silently drops it even though §2.3 declares it NOT NULL.
+//
+// Both live in a clearly-marked hand-written block at the BOTTOM of
+//   prisma/migrations/20260829171150_init/migration.sql
+// That block is committed to version control precisely so that a diff shows if it
+// ever goes missing. If you regenerate a migration from this schema, you MUST
+// re-add it by hand, or the database will accept rows the whitepaper forbids —
+// a bad protocol name, a zero-amount payment request, a NULL protocol list.
+//
+// The webhook-route and spend-cap tests exercise the columns but not the
+// constraints; `psql` is the only thing that will tell you they are gone.
+// ===========================================================================
+//
+// Prisma 7 removed `url` from the datasource block: the connection string for Migrate
+// now lives in prisma.config.ts, and the runtime client takes a driver adapter.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// §2.3 — merchants
+model Merchant {
+  id                         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name                       String
+  razorpayKeyId              String   @map("razorpay_key_id")
+  razorpayKeySecretEncrypted String   @map("razorpay_key_secret_encrypted")
+  /// policy shape: { maxAutoApprovePaise, blockedCategories: [], enabledProtocols: [] }
+  policy                     Json     @default("{}") @db.JsonB
+  enabledProtocols           String[] @default(["fallback"]) @map("enabled_protocols")
+  createdAt                  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  agentIdentities AgentIdentity[]
+  paymentRequests PaymentRequest[]
+
+  @@map("merchants")
+}
+
+/// §2.3 — agent_identities
+/// CHECK (protocol IN ('x402','ap2','fallback'))
+/// CHECK (trust_level IN ('untrusted','provisional','trusted'))
+model AgentIdentity {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  merchantId         String    @map("merchant_id") @db.Uuid
+  protocol           String
+  /// agent's self-declared identifier
+  externalAgentId    String    @map("external_agent_id")
+  /// PEM/base64, required for ap2
+  publicKey          String?   @map("public_key")
+  trustLevel         String    @default("untrusted") @map("trust_level")
+  spendingLimitPaise BigInt    @default(0) @map("spending_limit_paise")
+  spentPaise         BigInt    @default(0) @map("spent_paise")
+  revokedAt          DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  merchant        Merchant         @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  paymentRequests PaymentRequest[]
+
+  @@unique([merchantId, protocol, externalAgentId])
+  @@map("agent_identities")
+}
+
+/// §2.3 — payment_requests
+/// CHECK (normalized_amount_paise > 0)
+/// CHECK (status IN ('pending','awaiting_settlement','settled','failed','rejected'))
+model PaymentRequest {
+  id                    String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  merchantId            String   @map("merchant_id") @db.Uuid
+  agentIdentityId       String   @map("agent_identity_id") @db.Uuid
+  protocol              String
+  /// original protocol-native request, verbatim
+  rawPayload            Json     @map("raw_payload") @db.JsonB
+  normalizedAmountPaise BigInt   @map("normalized_amount_paise")
+  normalizedCurrency    String   @default("INR") @map("normalized_currency")
+  idempotencyKey        String   @unique @map("idempotency_key")
+  status                String   @default("pending")
+  rejectionReason       String?  @map("rejection_reason")
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  // §2.3 declares these FKs with no ON DELETE clause, i.e. Postgres NO ACTION.
+  merchant      Merchant      @relation(fields: [merchantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  agentIdentity AgentIdentity @relation(fields: [agentIdentityId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  mandates       Mandate[]
+  razorpayOrders RazorpayOrder[]
+  receipts       Receipt[]
+  auditLogs      AuditLog[]
+
+  @@index([status], map: "idx_payment_requests_status")
+  @@map("payment_requests")
+}
+
+/// §2.3 — mandates
+model Mandate {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  paymentRequestId String   @map("payment_request_id") @db.Uuid
+  /// 'IntentMandate' | 'PaymentMandate' | 'x402Envelope'
+  mandateType      String   @map("mandate_type")
+  /// exact bytes that were signed
+  canonicalPayload String   @map("canonical_payload")
+  signature        String
+  verified         Boolean  @default(false)
+  limitPaise       BigInt?  @map("limit_paise")
+  /// hard DB-level replay guard, in addition to Redis (§3.2)
+  nonce            String   @unique
+  expiresAt        DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  paymentRequest PaymentRequest @relation(fields: [paymentRequestId], references: [id], onDelete: Cascade)
+
+  @@map("mandates")
+}
+
+/// §2.3 — razorpay_orders
+/// CHECK (status IN ('created','attempted','paid','failed'))
+model RazorpayOrder {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  paymentRequestId  String   @map("payment_request_id") @db.Uuid
+  razorpayOrderId   String   @unique @map("razorpay_order_id")
+  razorpayPaymentId String?  @map("razorpay_payment_id")
+  status            String   @default("created")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  paymentRequest PaymentRequest @relation(fields: [paymentRequestId], references: [id], onDelete: Cascade)
+
+  @@map("razorpay_orders")
+}
+
+/// §2.3 — receipts
+model Receipt {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  paymentRequestId String   @map("payment_request_id") @db.Uuid
+  /// receipt formatted per the calling protocol's schema
+  protocolShape    Json     @map("protocol_shape") @db.JsonB
+  issuedAt         DateTime @default(now()) @map("issued_at") @db.Timestamptz(6)
+
+  paymentRequest PaymentRequest @relation(fields: [paymentRequestId], references: [id], onDelete: Cascade)
+
+  @@map("receipts")
+}
+
+/// §2.3 — webhook_events
+model WebhookEvent {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  /// primary replay guard for webhooks (§3.4)
+  razorpayEventId String    @unique @map("razorpay_event_id")
+  eventType       String    @map("event_type")
+  signatureValid  Boolean   @map("signature_valid")
+  rawPayload      Json      @map("raw_payload") @db.JsonB
+  processedAt     DateTime? @map("processed_at") @db.Timestamptz(6)
+  receivedAt      DateTime  @default(now()) @map("received_at") @db.Timestamptz(6)
+
+  @@map("webhook_events")
+}
+
+/// §2.3 — audit_log. Intentionally append-only: no updated_at, and no UPDATE/DELETE
+/// grants in production.
+/// CHECK (actor_type IN ('agent','merchant','system'))
+model AuditLog {
+  id               BigInt   @id @default(autoincrement())
+  actorType        String   @map("actor_type")
+  actorId          String?  @map("actor_id")
+  action           String
+  paymentRequestId String?  @map("payment_request_id") @db.Uuid
+  detail           Json     @default("{}") @db.JsonB
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  paymentRequest PaymentRequest? @relation(fields: [paymentRequestId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([paymentRequestId], map: "idx_audit_log_payment_request")
+  @@map("audit_log")
+}

@@ -1,0 +1,42 @@
+# dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# build output
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# generated Prisma client
+packages/gateway/src/generated/
+
+# secrets — .env.example is committed, .env never is (Phase 1 deliverable)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# logs / traces
+*.log
+npm-debug.log*
+packages/agent-client/traces/
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# test + coverage
+coverage/
+
+# docker volume data
+# docker-compose.yml uses Docker-managed NAMED volumes (postgres-data, redis-data),
+# which live under /var/lib/docker/volumes and never touch this directory. These
+# patterns are defensive: they only matter if someone switches to bind mounts.
+/postgres-data/
+/redis-data/
+/.docker-data/

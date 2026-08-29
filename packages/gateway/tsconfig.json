@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist",
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      // The razorpay SDK ships its entity namespaces as type-only .d.ts files with no
+      // .js counterpart, so NodeNext cannot resolve them by subpath. These imports are
+      // `import type` and erase completely at runtime, so the mapping is compile-time only.
+      "razorpay/types/*": ["../../node_modules/razorpay/dist/types/*"]
+    }
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "*.config.ts"],
+  "exclude": ["node_modules", "dist", "src/generated"]
+}

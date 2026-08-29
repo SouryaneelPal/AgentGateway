@@ -1,0 +1,9 @@
+node_modules
+dist
+.next
+packages/gateway/src/generated
+packages/gateway/prisma/migrations
+package-lock.json
+WHITEPAPER.md
+ROADMAP.md
+tasks.todo

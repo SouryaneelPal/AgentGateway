@@ -1,0 +1,17 @@
+node_modules
+**/node_modules
+.git
+.gitignore
+dist
+**/dist
+.next
+**/.next
+.env
+*.log
+coverage
+packages/dashboard
+packages/agent-client
+packages/gateway/src/generated
+WHITEPAPER.md
+ROADMAP.md
+tasks.todo
