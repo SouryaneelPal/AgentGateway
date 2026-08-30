@@ -24,6 +24,17 @@ export type RazorpayOrder = Orders.RazorpayOrder;
 export type RazorpayPaymentLink = PaymentLinks.RazorpayPaymentLink;
 export type RazorpayPayment = Payments.RazorpayPayment;
 
+/**
+ * The SDK's own type declares `customer` as REQUIRED on a Payment Link create body.
+ * That is wrong about the live API: sending `customer: {}` is rejected with
+ *   400 BAD_REQUEST_ERROR "incorrect JSON object received - faulty key: customer"
+ * while omitting the key entirely succeeds. This local type corrects the SDK's
+ * declaration so the omission can be expressed without reaching for `any`.
+ */
+type PaymentLinkPayload = Omit<PaymentLinks.RazorpayPaymentLinkCreateRequestBody, 'customer'> & {
+  customer?: PaymentLinks.RazorpayPaymentLinkCreateRequestBody['customer'];
+};
+
 export interface CreateOrderInput {
   /** Amount in paise — the gateway's only internal money unit (§2.2). */
   readonly amountPaise: number;
@@ -91,22 +102,43 @@ export class RazorpayClient {
 
   /** Creates a Payment Link — the fallbackAdapter's human-tap settlement path (§2.2). */
   async createPaymentLink(input: CreatePaymentLinkInput): Promise<RazorpayPaymentLink> {
-    return this.client.paymentLink.create({
+    const customer = {
+      ...(input.customerName === undefined ? {} : { name: input.customerName }),
+      ...(input.customerEmail === undefined ? {} : { email: input.customerEmail }),
+      ...(input.customerContact === undefined ? {} : { contact: input.customerContact }),
+    };
+
+    // Built as a mutable payload rather than one object literal: a conditional spread
+    // makes the property optional in the inferred type, which under
+    // exactOptionalPropertyTypes pushes the SDK onto the wrong `create` overload.
+    const payload: PaymentLinkPayload = {
       amount: input.amountPaise,
       currency: 'INR',
       description: input.description,
       reference_id: input.referenceId,
-      customer: {
-        ...(input.customerName === undefined ? {} : { name: input.customerName }),
-        ...(input.customerEmail === undefined ? {} : { email: input.customerEmail }),
-        ...(input.customerContact === undefined ? {} : { contact: input.customerContact }),
-      },
       notify: { sms: false, email: false },
-      ...(input.callbackUrl === undefined
-        ? {}
-        : { callback_url: input.callbackUrl, callback_method: 'get' as const }),
       notes: { ...input.notes },
-    });
+    };
+
+    // Razorpay rejects an EMPTY customer object outright:
+    //   BAD_REQUEST_ERROR "incorrect JSON object received - faulty key: customer"
+    // so the key must be omitted entirely when there are no customer details, not
+    // sent as {}. Found by a live Payment Link call; the original unit test asserted
+    // `customer: {}` and so pinned this bug in place rather than catching it.
+    if (Object.keys(customer).length > 0) {
+      payload.customer = customer;
+    }
+
+    if (input.callbackUrl !== undefined) {
+      payload.callback_url = input.callbackUrl;
+      payload.callback_method = 'get';
+    }
+
+    // Single narrow cast, back onto the SDK's (incorrect) declared shape. Confined to
+    // this one line so the corrected type governs everything above it.
+    return this.client.paymentLink.create(
+      payload as PaymentLinks.RazorpayPaymentLinkCreateRequestBody,
+    );
   }
 
   /** Captures an authorised payment. */

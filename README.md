@@ -133,8 +133,25 @@ npm install
 ### 3. Bring up Postgres, Redis and the gateway container
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
+
+> **⚠️ Always pass `--build` when the gateway's source has changed.**
+>
+> `docker compose up -d --force-recreate` recreates the container from the **existing
+> image** — it does _not_ rebuild it. The gateway's Dockerfile copies `packages/gateway`
+> in at build time, so without `--build` the container silently keeps serving whatever
+> code was current when the image was last built, no matter how many times you recreate
+> it.
+>
+> This bit us during Phase 3 webhook verification: an image built before Phase 2 was
+> still answering `POST /webhooks/razorpay` with the Phase 1 `501 not_implemented` stub,
+> hours after that code had been replaced. `/health` returned 200 the whole time, because
+> `/health` had not changed. Nothing looks wrong until a specific route misbehaves.
+>
+> Rule of thumb: `--build` after any source change, `--force-recreate` only when you
+> merely need fresh environment variables (Compose reads `.env` at container-create
+> time, so a changed `.env` does require a recreate).
 
 Three services come up: `postgres` on 5432, `redis` on 6379, and a containerised
 `gateway` on **3001**. All three have healthchecks, and the gateway waits for
@@ -213,17 +230,18 @@ npm run dev --workspace=dashboard    # http://localhost:3002
 
 ## Useful commands
 
-| Command                  | What it does                     |
-| ------------------------ | -------------------------------- |
-| `npm run dev`            | Gateway in watch mode on `PORT`  |
-| `npm run dev:dashboard`  | Next.js dashboard on 3002        |
-| `npm test`               | Vitest across workspaces         |
-| `npm run typecheck`      | `tsc --noEmit` across workspaces |
-| `npm run lint`           | ESLint across the repo           |
-| `npm run format`         | Prettier write                   |
-| `npm run db:migrate`     | `prisma migrate dev`             |
-| `npm run db:generate`    | Regenerate the Prisma client     |
-| `docker compose down -v` | Tear down and drop the volumes   |
+| Command                        | What it does                                                        |
+| ------------------------------ | ------------------------------------------------------------------- |
+| `npm run dev`                  | Gateway in watch mode on `PORT`                                     |
+| `npm run dev:dashboard`        | Next.js dashboard on 3002                                           |
+| `npm test`                     | Vitest across workspaces                                            |
+| `npm run typecheck`            | `tsc --noEmit` across workspaces                                    |
+| `npm run lint`                 | ESLint across the repo                                              |
+| `npm run format`               | Prettier write                                                      |
+| `npm run db:migrate`           | `prisma migrate dev`                                                |
+| `npm run db:generate`          | Regenerate the Prisma client                                        |
+| `docker compose up -d --build` | Rebuild the gateway image and restart — use after ANY source change |
+| `docker compose down -v`       | Tear down and drop the volumes                                      |
 
 ---
 

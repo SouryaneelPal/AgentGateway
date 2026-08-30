@@ -96,16 +96,30 @@ describe('RazorpayClient.createPaymentLink', () => {
     });
 
     expect(recorded.paymentLinks).toHaveLength(1);
+    // NOTE: `customer` must be ABSENT, not {}. An earlier version of this test asserted
+    // `customer: {}` and so locked in a bug — the live API rejects an empty customer
+    // object with 400 "incorrect JSON object received - faulty key: customer". The unit
+    // test agreed with the implementation and both were wrong; only a real call caught it.
     expect(recorded.paymentLinks[0]).toEqual({
       amount: 250_000,
       currency: 'INR',
       description: 'Cart cart_demo_001',
       reference_id: 'pr_abc',
-      customer: {},
       notify: { sms: false, email: false },
       notes: {},
     });
+    expect(Object.keys(recorded.paymentLinks[0] as object)).not.toContain('customer');
     expect(link.id).toBe('plink_TEST123');
+  });
+
+  it('omits the customer key entirely when no customer details are supplied', async () => {
+    const { recorded, options } = fakeSdk();
+    await new RazorpayClient(options).createPaymentLink({
+      amountPaise: 100,
+      description: 'd',
+      referenceId: 'r',
+    });
+    expect(recorded.paymentLinks[0]).not.toHaveProperty('customer');
   });
 
   it('omits absent customer fields entirely instead of sending undefined', async () => {

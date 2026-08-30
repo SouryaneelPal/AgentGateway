@@ -18,7 +18,8 @@
     "db:studio": "prisma studio",
     "razorpay:smoke": "tsx scripts/create-test-order.ts",
     "webhook:test": "tsx scripts/send-test-webhook.ts",
-    "demo:protocols": "tsx scripts/demo-protocols.ts"
+    "demo:protocols": "tsx scripts/demo-protocols.ts",
+    "checkout:live": "tsx scripts/create-live-checkout.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",

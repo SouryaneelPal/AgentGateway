@@ -277,6 +277,162 @@ describe('POST /webhooks/razorpay — redelivery guard (§3.4)', () => {
   });
 });
 
+describe('POST /webhooks/razorpay — idempotent settlement (settlement-application layer)', () => {
+  /**
+   * Replays the EXACT three-event sequence observed live on 2026-08-30: one ₹1
+   * netbanking payment against a Payment Link produced payment.captured, order.paid
+   * and payment_link.paid — three legitimate events, three distinct Razorpay event ids,
+   * one payment. Before the guard, each settled the request independently and left
+   * three webhook_settled rows in audit_log for a single settlement.
+   *
+   * This is NOT the razorpay_event_id replay guard (covered above). Distinct event ids
+   * mean the delivery-deduplication layer correctly lets all three through; the
+   * settlement-application layer is what must collapse them into one settlement.
+   */
+  function eventBody(event: string, paymentRequestId: string, paymentId: string): string {
+    return JSON.stringify({
+      entity: 'event',
+      event,
+      payload: {
+        payment: {
+          entity: {
+            id: paymentId,
+            amount: 100,
+            currency: 'INR',
+            status: 'captured',
+            method: 'netbanking',
+            notes: { paymentRequestId },
+          },
+        },
+        payment_link: {
+          entity: {
+            id: 'plink_TEST',
+            status: 'paid',
+            reference_id: paymentRequestId,
+            notes: { paymentRequestId },
+          },
+        },
+      },
+    });
+  }
+
+  it('collapses payment.captured + order.paid + payment_link.paid into ONE settlement', async () => {
+    const seeded = await seedAgent({ spendingLimitPaise: 500_000n });
+    created.push(seeded);
+    const paymentRequestId = await seedPaymentRequest(seeded, 100n);
+    await prisma.paymentRequest.update({
+      where: { id: paymentRequestId },
+      data: { status: 'awaiting_settlement' },
+    });
+
+    const paymentId = `pay_${randomUUID().replace(/-/g, '').slice(0, 14)}`;
+    const sequence = ['payment.captured', 'order.paid', 'payment_link.paid'] as const;
+    const responses = [];
+
+    for (const event of sequence) {
+      const body = eventBody(event, paymentRequestId, paymentId);
+      const eventId = `evt_${randomUUID()}`; // distinct id per event, as Razorpay sends
+      eventIds.push(eventId);
+      responses.push(await post(body, signedHeaders(body, eventId)));
+    }
+
+    // All three acknowledged with 200 — none rejected. Razorpay is behaving normally.
+    for (const response of responses) {
+      expect(response.statusCode).toBe(200);
+    }
+
+    // The first settles; the next two report the distinguishable already_settled branch.
+    expect(responses[0]?.json()).toMatchObject({
+      status: 'settled',
+      payment_request_id: paymentRequestId,
+    });
+    expect(responses[1]?.json()).toMatchObject({
+      status: 'already_settled',
+      reason: 'duplicate_settling_event',
+      payment_request_id: paymentRequestId,
+    });
+    expect(responses[2]?.json()).toMatchObject({
+      status: 'already_settled',
+      reason: 'duplicate_settling_event',
+    });
+
+    // EXACTLY ONE audit row for the settlement — the defect this guard fixes.
+    const audit = await prisma.auditLog.findMany({
+      where: { paymentRequestId, action: 'webhook_settled' },
+    });
+    expect(audit).toHaveLength(1);
+
+    // Status transitioned exactly once, and stayed settled.
+    const row = await prisma.paymentRequest.findUniqueOrThrow({ where: { id: paymentRequestId } });
+    expect(row.status).toBe('settled');
+
+    // All three deliveries were still stored and processed — nothing was dropped.
+    const stored = await prisma.webhookEvent.findMany({
+      where: { razorpayEventId: { in: eventIds } },
+      select: { eventType: true, signatureValid: true, processedAt: true },
+    });
+    expect(stored).toHaveLength(3);
+    for (const event of stored) {
+      expect(event.signatureValid).toBe(true);
+      expect(event.processedAt).not.toBeNull();
+    }
+    expect(stored.map((e) => e.eventType).sort()).toEqual([
+      'order.paid',
+      'payment.captured',
+      'payment_link.paid',
+    ]);
+  });
+
+  it('still settles normally when only one settling event arrives', async () => {
+    // Guards against the fix over-correcting into "never settle anything".
+    const seeded = await seedAgent({ spendingLimitPaise: 500_000n });
+    created.push(seeded);
+    const paymentRequestId = await seedPaymentRequest(seeded, 100n);
+    await prisma.paymentRequest.update({
+      where: { id: paymentRequestId },
+      data: { status: 'awaiting_settlement' },
+    });
+
+    const body = eventBody('payment.captured', paymentRequestId, 'pay_single');
+    const eventId = `evt_${randomUUID()}`;
+    eventIds.push(eventId);
+
+    const response = await post(body, signedHeaders(body, eventId));
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ status: 'settled' });
+    expect(
+      (await prisma.paymentRequest.findUniqueOrThrow({ where: { id: paymentRequestId } })).status,
+    ).toBe('settled');
+    expect(
+      await prisma.auditLog.count({ where: { paymentRequestId, action: 'webhook_settled' } }),
+    ).toBe(1);
+  });
+
+  it('keeps the two guards distinct: a true redelivery is duplicate_ignored, not already_settled', async () => {
+    const seeded = await seedAgent({ spendingLimitPaise: 500_000n });
+    created.push(seeded);
+    const paymentRequestId = await seedPaymentRequest(seeded, 100n);
+    await prisma.paymentRequest.update({
+      where: { id: paymentRequestId },
+      data: { status: 'awaiting_settlement' },
+    });
+
+    const body = eventBody('payment.captured', paymentRequestId, 'pay_redelivery');
+    const eventId = `evt_${randomUUID()}`;
+    eventIds.push(eventId);
+    const headers = signedHeaders(body, eventId);
+
+    const first = await post(body, headers);
+    // SAME event id => delivery-deduplication layer, not the settlement layer.
+    const redelivery = await post(body, headers);
+
+    expect(first.json()).toMatchObject({ status: 'settled' });
+    expect(redelivery.json()).toMatchObject({ status: 'duplicate_ignored' });
+    expect(redelivery.json()).not.toMatchObject({ status: 'already_settled' });
+  });
+});
+
 describe('POST /webhooks/razorpay — unmatched order', () => {
   it('records the event and acknowledges when no razorpay_orders row matches', async () => {
     const body = paymentCapturedBody('order_doesnotexist', 'pay_orphan');

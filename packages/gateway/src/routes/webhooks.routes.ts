@@ -215,6 +215,52 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
         return { settled: false as const, reason: 'no_matching_order' as const };
       }
 
+      // ---------------------------------------------------------------------
+      // GUARD 2 of 2 — IDEMPOTENT SETTLEMENT (settlement-application layer).
+      //
+      // Distinct from the razorpay_event_id guard above, and deliberately so:
+      //
+      //   * That guard is the DELIVERY-DEDUPLICATION layer. It answers "have I seen
+      //     THIS EVENT before?" and exists because Razorpay retries a failed delivery
+      //     with backoff (§3.4). Its key is razorpay_event_id.
+      //
+      //   * This guard is the SETTLEMENT-APPLICATION layer. It answers "has THIS
+      //     PAYMENT already been settled?" and exists because Razorpay sends SEVERAL
+      //     DIFFERENT events for one payment — a single Payment Link payment fires
+      //     payment.captured, order.paid and payment_link.paid, each with its own
+      //     event id. All three are legitimate, none is a redelivery, and the first
+      //     guard correctly lets all three through. Without this second guard each one
+      //     re-flipped the status and wrote another audit row: observed live on
+      //     2026-08-30, three webhook_settled rows for one ₹1 payment.
+      //
+      // Conflating them would be wrong in both directions — rejecting the 2nd and 3rd
+      // events as replays would be a lie, and treating a true redelivery as a fresh
+      // settlement would double-count.
+      //
+      // Implemented as a CONDITIONAL UPDATE rather than read-then-write: two events
+      // arriving concurrently could both read 'awaiting_settlement' and both proceed.
+      // `updateMany ... WHERE status <> 'settled'` makes the check and the write one
+      // atomic statement, and the affected-row count is the authority on who won.
+      const settlement = await tx.paymentRequest.updateMany({
+        where: { id: paymentRequestId, status: { not: 'settled' } },
+        data: { status: 'settled', updatedAt: new Date() },
+      });
+
+      if (settlement.count === 0) {
+        // Already settled by an earlier event in this same batch. Acknowledge with 200 —
+        // this is Razorpay behaving normally, not an error and not a replay — but write
+        // neither the status nor the audit row.
+        await tx.webhookEvent.update({
+          where: { id: event.id },
+          data: { processedAt: new Date() },
+        });
+        return {
+          settled: false as const,
+          reason: 'already_settled' as const,
+          paymentRequestId,
+        };
+      }
+
       if (order !== null) {
         await tx.razorpayOrder.update({
           where: { id: order.id },
@@ -224,11 +270,6 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
           },
         });
       }
-
-      await tx.paymentRequest.update({
-        where: { id: paymentRequestId },
-        data: { status: 'settled', updatedAt: new Date() },
-      });
 
       await tx.auditLog.create({
         data: {
@@ -261,6 +302,22 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
       );
       return reply.code(200).send({
         status: 'settled',
+        razorpay_event_id: razorpayEventId,
+        payment_request_id: result.paymentRequestId,
+      });
+    }
+
+    if (result.reason === 'already_settled') {
+      // Surfaced as its own status so logs and traces can tell "a second legitimate
+      // event for an already-settled payment" apart from a fresh settlement and from
+      // a true redelivery (which returns duplicate_ignored above).
+      request.log.info(
+        { razorpayEventId, eventType, paymentRequestId: result.paymentRequestId },
+        'webhook acknowledged — payment request was already settled',
+      );
+      return reply.code(200).send({
+        status: 'already_settled',
+        reason: 'duplicate_settling_event',
         razorpay_event_id: razorpayEventId,
         payment_request_id: result.paymentRequestId,
       });

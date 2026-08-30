@@ -31,14 +31,14 @@ Derived from [ROADMAP.md](ROADMAP.md). Design rationale lives in [WHITEPAPER.md]
 - [x] Write migrations for all eight tables, with indexes and constraints as specified
 - [x] Implement `PolicyEngine.checkSpendCap()` using the row-locked transactional check from §3.5
 - [x] Write unit tests covering the concurrent-request race explicitly (two simultaneous calls, assert only one succeeds)
-- [ ] Implement `RazorpayClient.createOrder()`, `.createPaymentLink()`, `.capturePayment()` against test-mode credentials
+- [x] Implement `RazorpayClient.createOrder()`, `.createPaymentLink()`, `.capturePayment()` against test-mode credentials
 - [x] Build the webhook listener with raw-body capture + HMAC verification (§3.4)
 - [x] Store every webhook event in `webhook_events` regardless of validity — log and reject invalid ones rather than silently dropping them
 
 **Validation:**
 
 - [x] A concurrency test proves the spend-cap check cannot be raced
-- [ ] A manually-triggered Razorpay test webhook is received, verified, and persisted correctly
+- [x] A manually-triggered Razorpay test webhook is received, verified, and persisted correctly
 - [x] A deliberately tampered signature is rejected and logged
 
 ## Phase 3 — Protocol Adapters & Cryptographic Engine
@@ -56,7 +56,7 @@ Derived from [ROADMAP.md](ROADMAP.md). Design rationale lives in [WHITEPAPER.md]
 - [x] A tampered AP2 signature is rejected pre-database
 - [x] A replayed nonce is rejected by Redis on the fast path
 - [x] In a forced-Redis-outage test, a replayed nonce is rejected by the Postgres unique constraint as a fallback
-- [ ] An x402 flow completes end-to-end against test-mode settlement
+- [x] An x402 flow completes end-to-end against test-mode settlement
 
 ## Phase 4 — Reference AI Agent Client
 
@@ -114,15 +114,61 @@ Derived from [ROADMAP.md](ROADMAP.md). Design rationale lives in [WHITEPAPER.md]
   sent from the Razorpay dashboard's webhook test-send. That needs real credentials plus
   a publicly reachable URL (ngrok/tunnel) for the gateway.
 
-**Phase 3 — left unchecked**
+**Webhook verification — closed 2026-08-30 (live, dashboard-driven)**
 
-- "An x402 flow completes end-to-end against test-mode settlement" — the full chain
-  (402 challenge -> proof -> awaiting_settlement -> webhook -> settled) is verified in
-  `test/protocol-adapters.test.ts` against real Postgres and real Redis, but with the
-  Razorpay SDK replaced by a stand-in. Against the LIVE gateway the flow reaches the
-  settlement call and stops at Razorpay's `401 Authentication failed`, because `.env`
-  still holds placeholder `rzp_test_xxxx` keys. Fill in real test-mode keys and run
-  `npm run demo:protocols --workspace=gateway` to close this one.
+- The Phase 2 box "A manually-triggered Razorpay test webhook is received, verified,
+  and persisted correctly" is now closed by a REAL Razorpay-signed delivery: a ₹1.00
+  netbanking payment (`pay_TW6JUsnwly33jQ`) against a live Payment Link
+  (`plink_TW69uRXXGtkbBC`), routed through an ngrok tunnel to the containerised gateway.
+  Three genuine events arrived — `payment.captured` (`TW6JcfU42FANPz`), `order.paid`
+  (`TW6Jd46ZevtOFA`), `payment_link.paid` (`TW6JdePOEhwMYh`) — all `signature_valid: true`,
+  all matched via `notes.paymentRequestId`, settling payment_request
+  `0ca4b096-0c55-4b7a-b320-8e1306f70a59`.
+  This is DISTINCT from the locally-signed `send-test-webhook.ts` harness verification
+  recorded earlier: Razorpay issued the event IDs and computed the HMAC. The local
+  harness remains the primary tool for routine testing — no tunnel, no credentials.
+  Razorpay's dashboard has no "send test webhook" control on this account, so a real
+  test-card/netbanking payment was the only route.
+- `RazorpayClient` is also now verified against live test-mode credentials:
+  `createOrder` (`order_TW5Ns3aGRYZI1H`, via razorpay:smoke) and `createPaymentLink`
+  (the link above). `capturePayment` is still only unit-tested — nothing in the current
+  flows calls it, since Razorpay auto-captures.
+
+- ⚠️ THE NGROK REGISTRATION IS DEAD. The free-tier URL
+  `https://neuter-synthetic-overhand.ngrok-free.dev` was ephemeral and the tunnel has
+  been stopped. The webhook registered in the Razorpay dashboard now points nowhere and
+  must be re-created against a fresh tunnel URL for any repeat live test. Use
+  `npm run webhook:test --workspace=gateway` for routine verification instead.
+
+**Defect found during this verification — FIXED 2026-08-30**
+
+- All three legitimate events settled the SAME payment_request, leaving THREE
+  `system:webhook_settled` rows in audit_log for one settlement. Fixed with an
+  idempotent-settlement guard in webhooks.routes.ts: a conditional
+  `updateMany ... WHERE status <> 'settled'` makes check-and-write one atomic statement
+  (a read-then-write would race two concurrent events), and a zero affected-row count
+  returns 200 `{"status":"already_settled","reason":"duplicate_settling_event"}` while
+  skipping both the status write and the audit insert.
+  Kept deliberately DISTINCT from the razorpay_event_id replay guard, which is the
+  delivery-deduplication layer ("have I seen this EVENT?"); this is the
+  settlement-application layer ("has this PAYMENT already settled?"). A true redelivery
+  still returns `duplicate_ignored`, not `already_settled`.
+  Covered by three tests replaying the exact live three-event sequence; mutation-tested
+  by disabling the guard, which fails the collapse assertion.
+
+**Phases 2 and 3 — ALL BOXES NOW CLOSED**
+
+- The last one, "An x402 flow completes end-to-end against test-mode settlement", closed
+  2026-08-30 via `npm run demo:protocols --workspace=gateway` against real test-mode
+  credentials: 402 challenge -> proof redeemed (200) -> status awaiting_settlement ->
+  webhook -> status settled. The Razorpay Order in that run was created for real through
+  RazorpayClient, not stubbed. Critically, the request was NOT settled at the adapter's
+  settle() step — only after the webhook, which is the §1.3 trust boundary holding under
+  live conditions.
+- `capturePayment` remains unit-tested only. This is BY DESIGN, not a gap: Razorpay
+  auto-captures payments in this configuration and nothing in any current flow calls
+  capture explicitly. The wrapper exists so a future flow that needs manual capture has
+  a typed entry point; its request shape is pinned by test/razorpay-client.test.ts.
 
 **Phase 3 — decisions**
 
