@@ -17,10 +17,13 @@
     "db:migrate:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
     "razorpay:smoke": "tsx scripts/create-test-order.ts",
-    "webhook:test": "tsx scripts/send-test-webhook.ts"
+    "webhook:test": "tsx scripts/send-test-webhook.ts",
+    "demo:protocols": "tsx scripts/demo-protocols.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",
+    "@noble/ed25519": "^2.3.0",
+    "@noble/hashes": "^2.4.0",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "dotenv": "^17.4.2",

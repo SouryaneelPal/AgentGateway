@@ -23,12 +23,19 @@ import { verifyWebhookSignature } from '../razorpay/webhook-signature.js';
 import { createHash } from 'node:crypto';
 
 /** Events that move money in this system. Anything else is stored and acknowledged. */
-const SETTLING_EVENTS = new Set(['payment.captured', 'order.paid']);
+const SETTLING_EVENTS = new Set(['payment.captured', 'order.paid', 'payment_link.paid']);
 
 interface ExtractedEvent {
   readonly eventType: string;
   readonly razorpayOrderId: string | null;
   readonly razorpayPaymentId: string | null;
+  /**
+   * The fallback adapter settles through a Payment Link, and no razorpay_orders row
+   * exists for it at link-creation time (Razorpay only mints the order when the human
+   * actually pays). It stamps notes.paymentRequestId on the link instead, so that is
+   * the second way home for an event with no matching order.
+   */
+  readonly notedPaymentRequestId: string | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -59,12 +66,23 @@ function extractEvent(body: unknown): ExtractedEvent {
 
   const paymentEntity = readEntity(payload, 'payment');
   const orderEntity = readEntity(payload, 'order');
+  const paymentLinkEntity = readEntity(payload, 'payment_link');
+
+  const notedPaymentRequestId =
+    readNotedPaymentRequestId(paymentEntity) ?? readNotedPaymentRequestId(paymentLinkEntity);
 
   return {
     eventType,
     razorpayOrderId: readString(paymentEntity, 'order_id') ?? readString(orderEntity, 'id'),
     razorpayPaymentId: readString(paymentEntity, 'id'),
+    notedPaymentRequestId: notedPaymentRequestId ?? readString(paymentLinkEntity, 'reference_id'),
   };
+}
+
+/** Razorpay echoes the `notes` map back on the entity it was set on. */
+function readNotedPaymentRequestId(entity: unknown): string | null {
+  if (!isRecord(entity)) return null;
+  return readString(entity['notes'], 'paymentRequestId');
 }
 
 /**
@@ -116,7 +134,8 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
     }
 
     const razorpayEventId = resolveEventId(request.headers['x-razorpay-event-id'], rawBody);
-    const { eventType, razorpayOrderId, razorpayPaymentId } = extractEvent(parsed);
+    const { eventType, razorpayOrderId, razorpayPaymentId, notedPaymentRequestId } =
+      extractEvent(parsed);
 
     // Redelivery guard (§3.4). Razorpay retries on failure with backoff;
     // webhook_events.razorpay_event_id is UNIQUE at the DB level, and this read is the
@@ -156,7 +175,10 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
         select: { id: true },
       });
 
-      if (!SETTLING_EVENTS.has(eventType) || razorpayOrderId === null) {
+      if (
+        !SETTLING_EVENTS.has(eventType) ||
+        (razorpayOrderId === null && notedPaymentRequestId === null)
+      ) {
         await tx.webhookEvent.update({
           where: { id: event.id },
           data: { processedAt: new Date() },
@@ -164,12 +186,28 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
         return { settled: false as const, reason: 'not_a_settling_event' as const };
       }
 
-      const order = await tx.razorpayOrder.findUnique({
-        where: { razorpayOrderId },
-        select: { id: true, paymentRequestId: true },
-      });
+      const order =
+        razorpayOrderId === null
+          ? null
+          : await tx.razorpayOrder.findUnique({
+              where: { razorpayOrderId },
+              select: { id: true, paymentRequestId: true },
+            });
 
-      if (order === null) {
+      // Fall back to the payment_request the Payment Link was stamped with. This is the
+      // fallback adapter's settlement path: it has no razorpay_orders row to match on.
+      const paymentRequestId =
+        order?.paymentRequestId ??
+        (notedPaymentRequestId === null
+          ? null
+          : ((
+              await tx.paymentRequest.findUnique({
+                where: { id: notedPaymentRequestId },
+                select: { id: true },
+              })
+            )?.id ?? null));
+
+      if (paymentRequestId === null) {
         await tx.webhookEvent.update({
           where: { id: event.id },
           data: { processedAt: new Date() },
@@ -177,16 +215,18 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
         return { settled: false as const, reason: 'no_matching_order' as const };
       }
 
-      await tx.razorpayOrder.update({
-        where: { id: order.id },
-        data: {
-          status: 'paid',
-          ...(razorpayPaymentId === null ? {} : { razorpayPaymentId }),
-        },
-      });
+      if (order !== null) {
+        await tx.razorpayOrder.update({
+          where: { id: order.id },
+          data: {
+            status: 'paid',
+            ...(razorpayPaymentId === null ? {} : { razorpayPaymentId }),
+          },
+        });
+      }
 
       await tx.paymentRequest.update({
-        where: { id: order.paymentRequestId },
+        where: { id: paymentRequestId },
         data: { status: 'settled', updatedAt: new Date() },
       });
 
@@ -195,12 +235,13 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
           actorType: 'system',
           actorId: 'razorpay_webhook',
           action: 'webhook_settled',
-          paymentRequestId: order.paymentRequestId,
+          paymentRequestId,
           detail: {
             razorpayEventId,
             eventType,
             razorpayOrderId,
             razorpayPaymentId,
+            matchedVia: order === null ? 'payment_link_notes' : 'razorpay_order',
           } satisfies Prisma.InputJsonObject,
         },
       });
@@ -210,11 +251,7 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
         data: { processedAt: new Date() },
       });
 
-      return {
-        settled: true as const,
-        paymentRequestId: order.paymentRequestId,
-        razorpayOrderId,
-      };
+      return { settled: true as const, paymentRequestId, razorpayOrderId };
     });
 
     if (result.settled) {

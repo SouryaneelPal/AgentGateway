@@ -180,6 +180,32 @@ export class PolicyEngine {
     return { outcome: 'approved', remainingPaise: decision.remainingPaise };
   }
 
+  /**
+   * Loads the effective merchant policy for an agent.
+   *
+   * Exposed so adapters can set NormalizedPaymentRequest.requiresHumanApproval from the
+   * SAME ceiling this engine enforces (§2.2: ap2Adapter.normalize "flagging
+   * requiresHumanApproval = true if the mandate amount exceeds the merchant's
+   * auto-approve ceiling"). Adapters must read the ceiling from here rather than
+   * re-deriving it, so the flag and the guardrail can never disagree.
+   */
+  async getMerchantPolicyForAgent(agentIdentityId: string): Promise<MerchantPolicy | null> {
+    const agent = await prisma.agentIdentity.findUnique({
+      where: { id: agentIdentityId },
+      select: { merchant: { select: { policy: true, enabledProtocols: true } } },
+    });
+
+    if (agent === null) return null;
+    return parseMerchantPolicy(agent.merchant.policy, agent.merchant.enabledProtocols);
+  }
+
+  /** True when the amount is above the merchant's auto-approve ceiling (0 = no ceiling). */
+  async exceedsAutoApproveCeiling(agentIdentityId: string, amountPaise: number): Promise<boolean> {
+    const policy = await this.getMerchantPolicyForAgent(agentIdentityId);
+    if (policy === null) return false;
+    return policy.maxAutoApprovePaise > 0 && amountPaise > policy.maxAutoApprovePaise;
+  }
+
   /** Re-exported so callers depend on the engine rather than reaching past it. */
   async checkSpendCap(
     agentIdentityId: string,

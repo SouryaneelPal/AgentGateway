@@ -43,19 +43,19 @@ Derived from [ROADMAP.md](ROADMAP.md). Design rationale lives in [WHITEPAPER.md]
 
 ## Phase 3 — Protocol Adapters & Cryptographic Engine
 
-- [ ] Build `x402Adapter` to issue the `402` challenge
-- [ ] Validate retried x402 requests against the original reference and enforce one-time redemption
-- [ ] Build `ap2Adapter` to canonicalize and verify `IntentMandate` signatures
-- [ ] Enforce nonce uniqueness in `ap2Adapter` across Redis and the DB
-- [ ] Map validated AP2 mandates to `NormalizedPaymentRequest`
-- [ ] Build `fallbackAdapter` with Payment Link generation + the human-confirmation webhook path
-- [ ] Build the protocol router that inspects request shape/headers and dispatches to the correct adapter, defaulting to `fallbackAdapter` for anything unrecognized
+- [x] Build `x402Adapter` to issue the `402` challenge
+- [x] Validate retried x402 requests against the original reference and enforce one-time redemption
+- [x] Build `ap2Adapter` to canonicalize and verify `IntentMandate` signatures
+- [x] Enforce nonce uniqueness in `ap2Adapter` across Redis and the DB
+- [x] Map validated AP2 mandates to `NormalizedPaymentRequest`
+- [x] Build `fallbackAdapter` with Payment Link generation + the human-confirmation webhook path
+- [x] Build the protocol router that inspects request shape/headers and dispatches to the correct adapter, defaulting to `fallbackAdapter` for anything unrecognized
 
 **Validation:**
 
-- [ ] A tampered AP2 signature is rejected pre-database
-- [ ] A replayed nonce is rejected by Redis on the fast path
-- [ ] In a forced-Redis-outage test, a replayed nonce is rejected by the Postgres unique constraint as a fallback
+- [x] A tampered AP2 signature is rejected pre-database
+- [x] A replayed nonce is rejected by Redis on the fast path
+- [x] In a forced-Redis-outage test, a replayed nonce is rejected by the Postgres unique constraint as a fallback
 - [ ] An x402 flow completes end-to-end against test-mode settlement
 
 ## Phase 4 — Reference AI Agent Client
@@ -113,6 +113,32 @@ Derived from [ROADMAP.md](ROADMAP.md). Design rationale lives in [WHITEPAPER.md]
   correctly" — verified only with a **locally-signed** Razorpay-shaped delivery, not one
   sent from the Razorpay dashboard's webhook test-send. That needs real credentials plus
   a publicly reachable URL (ngrok/tunnel) for the gateway.
+
+**Phase 3 — left unchecked**
+
+- "An x402 flow completes end-to-end against test-mode settlement" — the full chain
+  (402 challenge -> proof -> awaiting_settlement -> webhook -> settled) is verified in
+  `test/protocol-adapters.test.ts` against real Postgres and real Redis, but with the
+  Razorpay SDK replaced by a stand-in. Against the LIVE gateway the flow reaches the
+  settlement call and stops at Razorpay's `401 Authentication failed`, because `.env`
+  still holds placeholder `rzp_test_xxxx` keys. Fill in real test-mode keys and run
+  `npm run demo:protocols --workspace=gateway` to close this one.
+
+**Phase 3 — decisions**
+
+- `PolicyEngine.evaluate()` is called by a shared pipeline (`pipeline/payment-pipeline.ts`)
+  rather than by each adapter individually. Same guarantee, enforced structurally:
+  `settle()` is only reachable through the approved branch of that pipeline, so a future
+  adapter cannot forget to check policy. This IS a deviation from the literal "every
+  adapter must call PolicyEngine.evaluate()" instruction.
+- x402's one-time `reference` reuses the AP2 nonce guard rather than a second mechanism,
+  per §3.2's final bullet — the two are the same kind of single-use token.
+- The fallback adapter settles via Payment Link and has no `razorpay_orders` row, so the
+  webhook route now also resolves a payment_request from `notes.paymentRequestId`.
+  Without that the fallback path could never reach 'settled'.
+- §3.3's `deriveIdempotencyKey` was implemented here (nominally Phase 2) because
+  `payment_requests.idempotency_key` is NOT NULL UNIQUE — no adapter can persist a
+  request without it.
 
 **Phase 2 — decisions**
 

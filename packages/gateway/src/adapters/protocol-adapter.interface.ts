@@ -123,3 +123,84 @@ export interface ProtocolAdapter {
   // Step 4: convert the settlement outcome back into the protocol's receipt shape
   formatReceipt(result: SettlementResult): Promise<ProtocolReceipt>;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3 additions.
+//
+// §2.2's ProtocolAdapter above is left exactly as the whitepaper declares it. The
+// routing and policy machinery Phase 3 needs is layered on in a sub-interface rather
+// than by editing that contract.
+// ---------------------------------------------------------------------------
+
+/**
+ * Self-description used by the protocol router (§2.2: "the router doesn't need to know
+ * anything protocol-specific — it just needs to know which adapter to hand a request
+ * to"). Each adapter owns its own detection rule, so the router contains no protocol
+ * knowledge at all: it only asks each registered adapter whether the request is theirs.
+ */
+export interface RoutableProtocolAdapter extends ProtocolAdapter {
+  /** Does this adapter handle the incoming request? Inspected from headers/shape only. */
+  matches(request: IncomingRequest): boolean;
+
+  /**
+   * True when this adapter's settle() path IS a human-approval flow — the fallback
+   * adapter's Payment Link is exactly that. The pipeline uses this to decide whether a
+   * `requires_human_approval` policy outcome is a stop condition or the intended route,
+   * without needing to know which protocol it is looking at.
+   */
+  readonly settlesViaHumanApproval: boolean;
+}
+
+/**
+ * Typed, machine-readable rejections (§3.5 step 3: "not a generic 500").
+ *
+ * §3.5 defines the spend-cap shape verbatim; the other guardrails follow the same
+ * pattern — a stable `error` code, the specific facts that explain the decision, and
+ * the payment_request_id so a caller can look up the audit trail. Snake-case keys are
+ * deliberate: these objects are the wire shape and are serialised as-is.
+ */
+export interface RejectionEnvelopeBase {
+  readonly error: string;
+  readonly payment_request_id: string | null;
+}
+
+export interface SpendCapRejectionEnvelope extends RejectionEnvelopeBase {
+  readonly error: 'spend_cap_exceeded';
+  readonly requested: number;
+  readonly remaining: number;
+}
+
+export interface AgentRevokedRejectionEnvelope extends RejectionEnvelopeBase {
+  readonly error: 'agent_revoked';
+  readonly agent_identity_id: string;
+}
+
+export interface ProtocolDisabledRejectionEnvelope extends RejectionEnvelopeBase {
+  readonly error: 'protocol_disabled';
+  readonly protocol: string;
+  readonly enabled_protocols: readonly string[];
+}
+
+export interface CategoryBlockedRejectionEnvelope extends RejectionEnvelopeBase {
+  readonly error: 'category_blocked';
+  readonly category: string;
+  readonly blocked_categories: readonly string[];
+}
+
+export interface HumanApprovalRequiredEnvelope extends RejectionEnvelopeBase {
+  readonly error: 'human_approval_required';
+  readonly reason: string;
+}
+
+export interface ValidationRejectionEnvelope extends RejectionEnvelopeBase {
+  readonly error: ValidationFailureReason;
+  readonly detail: Readonly<Record<string, unknown>>;
+}
+
+export type RejectionEnvelope =
+  | SpendCapRejectionEnvelope
+  | AgentRevokedRejectionEnvelope
+  | ProtocolDisabledRejectionEnvelope
+  | CategoryBlockedRejectionEnvelope
+  | HumanApprovalRequiredEnvelope
+  | ValidationRejectionEnvelope;

@@ -10,6 +10,7 @@
 import { randomUUID } from 'node:crypto';
 import { type Prisma } from '../../src/generated/prisma/index.js';
 import { prisma } from '../../src/db/prisma-client.js';
+import { generateAgentKeypair } from '../../src/crypto/ed25519-verify.js';
 
 export interface SeededAgent {
   readonly merchantId: string;
@@ -55,6 +56,50 @@ export async function seedAgent(options: SeedAgentOptions): Promise<SeededAgent>
   return { merchantId: merchant.id, agentIdentityId: agent.id };
 }
 
+/** Seeds an agent with a registered Ed25519 public key, as §3.1's onboarding step does. */
+export async function seedAgentWithKey(
+  options: SeedAgentOptions & { protocol?: 'x402' | 'ap2' | 'fallback' },
+): Promise<
+  SeededAgent & { publicKeyBase64: string; privateKeyBase64: string; externalAgentId: string }
+> {
+  const keypair = generateAgentKeypair();
+  const suffix = randomUUID().slice(0, 8);
+  const externalAgentId = `agent-${suffix}`;
+
+  const merchant = await prisma.merchant.create({
+    data: {
+      name: `test-merchant-${suffix}`,
+      razorpayKeyId: 'rzp_test_fixture',
+      razorpayKeySecretEncrypted: 'fixture',
+      enabledProtocols: options.enabledProtocols ?? ['x402', 'ap2', 'fallback'],
+      policy: options.policy ?? {},
+    },
+    select: { id: true },
+  });
+
+  const agent = await prisma.agentIdentity.create({
+    data: {
+      merchantId: merchant.id,
+      protocol: options.protocol ?? 'ap2',
+      externalAgentId,
+      publicKey: keypair.publicKeyBase64,
+      trustLevel: 'provisional',
+      spendingLimitPaise: options.spendingLimitPaise,
+      spentPaise: options.spentPaise ?? 0n,
+      revokedAt: options.revoked === true ? new Date() : null,
+    },
+    select: { id: true },
+  });
+
+  return {
+    merchantId: merchant.id,
+    agentIdentityId: agent.id,
+    externalAgentId,
+    publicKeyBase64: keypair.publicKeyBase64,
+    privateKeyBase64: keypair.privateKeyBase64,
+  };
+}
+
 /** Creates a payment_requests row so audit_log's FK has something real to point at. */
 export async function seedPaymentRequest(
   seeded: SeededAgent,
@@ -85,10 +130,15 @@ export async function readAgent(
 
 /** Removes every row this fixture created, children first. */
 export async function cleanup(seeded: SeededAgent): Promise<void> {
-  await prisma.auditLog.deleteMany({
-    where: { paymentRequest: { merchantId: seeded.merchantId } },
+  const requests = await prisma.paymentRequest.findMany({
+    where: { merchantId: seeded.merchantId },
+    select: { id: true },
   });
+  const requestIds = requests.map((r) => r.id);
+
+  await prisma.auditLog.deleteMany({ where: { paymentRequestId: { in: requestIds } } });
   await prisma.auditLog.deleteMany({ where: { actorId: seeded.agentIdentityId } });
+  // mandates / razorpay_orders / receipts cascade from payment_requests (§2.3).
   await prisma.paymentRequest.deleteMany({ where: { merchantId: seeded.merchantId } });
   await prisma.agentIdentity.deleteMany({ where: { merchantId: seeded.merchantId } });
   await prisma.merchant.deleteMany({ where: { id: seeded.merchantId } });
