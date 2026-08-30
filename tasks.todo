@@ -60,14 +60,14 @@ Derived from [ROADMAP.md](ROADMAP.md). Design rationale lives in [WHITEPAPER.md]
 
 ## Phase 4 — Reference AI Agent Client
 
-- [ ] Build a CLI agent invocable as `--protocol=x402` and `--protocol=ap2`, both purchasing the same test cart against the local gateway
-- [ ] Have the agent generate its own Ed25519 keypair for the AP2 run
-- [ ] Write a setup script that registers the agent's public key (simulating merchant-side agent onboarding)
-- [ ] Log the full request/response trace to a JSON file for the Phase 5 tester panel and the demo video
+- [x] Build a CLI agent invocable as `--protocol=x402` and `--protocol=ap2`, both purchasing the same test cart against the local gateway
+- [x] Have the agent generate its own Ed25519 keypair for the AP2 run
+- [x] Write a setup script that registers the agent's public key (simulating merchant-side agent onboarding)
+- [x] Log the full request/response trace to a JSON file for the Phase 5 tester panel and the demo video
 
 **Validation:**
 
-- [ ] Both protocol runs, against the identical cart and identical merchant, terminate in the same `razorpay_orders` row shape underneath
+- [x] Both protocol runs, against the identical cart and identical merchant, terminate in the same `razorpay_orders` row shape underneath
 
 ## Phase 5 — Merchant Dashboard & Interactive Protocol Tester
 
@@ -113,6 +113,39 @@ Derived from [ROADMAP.md](ROADMAP.md). Design rationale lives in [WHITEPAPER.md]
   correctly" — verified only with a **locally-signed** Razorpay-shaped delivery, not one
   sent from the Razorpay dashboard's webhook test-send. That needs real credentials plus
   a publicly reachable URL (ngrok/tunnel) for the gateway.
+
+**Phase 4 — closed 2026-08-30**
+
+- Reasoning layer is NVIDIA Nemotron 3 Ultra (`nvidia/nemotron-3-ultra-550b-a55b:free`)
+  via OpenRouter, behind `CartPicker` (packages/agent-client/src/picker.ts). Two
+  implementations: `LlmToolAgent` (default) and `DeterministicPicker` (offline fallback,
+  `--deterministic`). Verified Nemotron really drives the decision — the raw
+  `initiate_purchase` tool_call is in the trace, unparaphrased.
+- `claude-tool-agent.ts` was RENAMED to `llm-tool-agent.ts`. It no longer talks to
+  Claude, and a filename naming one vendor would contradict the whitepaper's own claim
+  that this layer is provider-agnostic.
+- WHITEPAPER.md and ROADMAP.md's forward-reference "(see agent-client's picker
+  interface)" was RECONCILED to name the real thing: "`CartPicker`, in
+  `packages/agent-client/src/picker.ts`, implemented by both `LlmToolAgent` and the
+  offline `DeterministicPicker`". Both files updated together.
+- `.env.example` gap CLOSED: `OPENROUTER_API_KEY` is now documented there. It had been
+  present only in the untracked local `.env`, so a fresh clone had no way to learn it
+  was needed.
+- Added `POST /v1/merchant/agents/register` to the gateway. Not in §2.4's route table —
+  added because §3.1 describes agent onboarding and the reference agent needs a real
+  path for it. Marked demo-only in code: unauthenticated, and creates a merchant by name
+  when none is supplied. Must not survive to production (§5.4).
+- RATE-LIMIT / OUTAGE FALLBACK WAS EXERCISED FOR REAL: one AP2 run hit
+  "Upstream error from Nvidia: Service temporarily overloaded (code 502)" returned as
+  HTTP 200 with no `choices`, and fell back to the deterministic picker. That first
+  surfaced as a crash ("Cannot read properties of undefined reading '0'") because the
+  guard checked the element, not the array; fixed, and such responses are now treated as
+  fallback-eligible like a 429.
+- Non-determinism confirmed harmless: two x402 runs with Nemotron picked DIFFERENT items
+  (SKU-COFFEE-250G 45000, then SKU-CABLE-USBC 55000) yet both produced the same
+  settlement shape.
+- Corrupted-signature interop proven against the LIVE gateway from this client:
+  HTTP 403 `signature_invalid`, `payment_request_id: null` — rejected pre-database.
 
 **Webhook verification — closed 2026-08-30 (live, dashboard-driven)**
 

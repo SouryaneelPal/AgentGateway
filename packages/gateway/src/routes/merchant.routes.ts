@@ -6,6 +6,7 @@
 
 import type { FastifyPluginAsync } from 'fastify';
 import { NotImplementedError } from '../errors.js';
+import { prisma } from '../db/prisma-client.js';
 
 interface AgentParams {
   readonly id: string;
@@ -21,6 +22,132 @@ interface AuditLogQuery {
 }
 
 export const merchantRoutes: FastifyPluginAsync = async (app) => {
+  /**
+   * Agent onboarding (§3.1 step 1: "At onboarding, each agent registers an Ed25519
+   * public key against its agent_identities row. The private key never touches the
+   * gateway.").
+   *
+   * NOT in §2.4's route table — added in Phase 4 because the reference agent needs a
+   * real onboarding path and §3.1 describes one. Deliberately the only merchant-facing
+   * route implemented ahead of Phase 5.
+   *
+   * DEMO-ONLY CAVEAT: this endpoint is unauthenticated and will create a merchant by
+   * name when no merchantId is supplied. That is acceptable for a test-mode build and
+   * must not survive into anything production-facing — real onboarding belongs behind
+   * merchant authentication (§5.4's production-hardening note).
+   */
+  app.post('/v1/merchant/agents/register', async (request, reply) => {
+    const body = request.body;
+
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      return reply.code(400).send({ error: 'malformed_request' });
+    }
+
+    const fields = body as Record<string, unknown>;
+    const protocol = fields['protocol'];
+    const externalAgentId = fields['externalAgentId'];
+    const publicKey = fields['publicKey'];
+    const merchantId = fields['merchantId'];
+    const merchantName = fields['merchantName'];
+    const spendingLimitPaise = fields['spendingLimitPaise'];
+
+    if (protocol !== 'x402' && protocol !== 'ap2' && protocol !== 'fallback') {
+      return reply.code(400).send({ error: 'malformed_request', detail: 'invalid protocol' });
+    }
+    if (typeof externalAgentId !== 'string' || externalAgentId.length === 0) {
+      return reply
+        .code(400)
+        .send({ error: 'malformed_request', detail: 'externalAgentId required' });
+    }
+    // §3.1: an AP2 agent without a registered public key can never be verified.
+    if (protocol === 'ap2' && (typeof publicKey !== 'string' || publicKey.length === 0)) {
+      return reply
+        .code(400)
+        .send({ error: 'malformed_request', detail: 'publicKey is required for ap2 agents' });
+    }
+
+    let resolvedMerchantId: string;
+
+    if (typeof merchantId === 'string' && merchantId.length > 0) {
+      const merchant = await prisma.merchant.findUnique({
+        where: { id: merchantId },
+        select: { id: true },
+      });
+      if (merchant === null) {
+        return reply.code(404).send({ error: 'unknown_merchant', merchantId });
+      }
+      resolvedMerchantId = merchant.id;
+    } else {
+      const name =
+        typeof merchantName === 'string' && merchantName.length > 0
+          ? merchantName
+          : 'agent-client-demo-merchant';
+      const existing = await prisma.merchant.findFirst({ where: { name }, select: { id: true } });
+      resolvedMerchantId =
+        existing?.id ??
+        (
+          await prisma.merchant.create({
+            data: {
+              name,
+              razorpayKeyId: '(demo merchant — gateway uses its own env credentials)',
+              razorpayKeySecretEncrypted: '(not stored)',
+              enabledProtocols: ['x402', 'ap2', 'fallback'],
+            },
+            select: { id: true },
+          })
+        ).id;
+    }
+
+    const limit =
+      typeof spendingLimitPaise === 'number' && Number.isInteger(spendingLimitPaise)
+        ? BigInt(spendingLimitPaise)
+        : 1_000_000n;
+
+    const agent = await prisma.agentIdentity.upsert({
+      where: {
+        merchantId_protocol_externalAgentId: {
+          merchantId: resolvedMerchantId,
+          protocol,
+          externalAgentId,
+        },
+      },
+      create: {
+        merchantId: resolvedMerchantId,
+        protocol,
+        externalAgentId,
+        publicKey: typeof publicKey === 'string' ? publicKey : null,
+        trustLevel: 'provisional',
+        spendingLimitPaise: limit,
+      },
+      update: {
+        publicKey: typeof publicKey === 'string' ? publicKey : null,
+        spendingLimitPaise: limit,
+        // Re-registering an agent clears a prior revocation, which is what a merchant
+        // re-onboarding an agent means.
+        revokedAt: null,
+      },
+      select: { id: true, protocol: true, externalAgentId: true, trustLevel: true },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        actorType: 'merchant',
+        actorId: resolvedMerchantId,
+        action: 'agent_registered',
+        detail: { agentIdentityId: agent.id, protocol, externalAgentId },
+      },
+    });
+
+    return reply.code(201).send({
+      agent_identity_id: agent.id,
+      merchant_id: resolvedMerchantId,
+      protocol: agent.protocol,
+      external_agent_id: agent.externalAgentId,
+      trust_level: agent.trustLevel,
+      spending_limit_paise: Number(limit),
+    });
+  });
+
   /** TODO(Phase 5): fetch current guardrails from merchants.policy. */
   app.get('/v1/merchant/policy', async () => {
     throw new NotImplementedError('GET /v1/merchant/policy', 'Phase 5');

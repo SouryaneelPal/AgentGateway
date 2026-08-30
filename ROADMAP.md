@@ -36,7 +36,7 @@ Section references (§2.2, §3.4, §3.5, §5.3) point back into WHITEPAPER.md.
 **Validation checklist:** a tampered AP2 signature is rejected pre-database; a replayed nonce is rejected by Redis on the fast path and, in a forced-Redis-outage test, by the Postgres unique constraint as a fallback; an x402 flow completes end-to-end against test-mode settlement.
 
 ### Phase 4 — Reference AI Agent Client
-**Stack:** Node.js/TypeScript CLI script whose reasoning layer is built against NVIDIA Nemotron 3 Ultra (550B-A55B MoE, free tier via OpenRouter's OpenAI-compatible endpoint), chosen for zero-cost iteration during prototyping. The reasoning layer sits behind a provider-agnostic interface (see agent-client's picker interface) — the Anthropic API remains a documented, deferred alternative, swappable in a single file, not a redesign.
+**Stack:** Node.js/TypeScript CLI script whose reasoning layer is built against NVIDIA Nemotron 3 Ultra (550B-A55B MoE, free tier via OpenRouter's OpenAI-compatible endpoint), chosen for zero-cost iteration during prototyping. The reasoning layer sits behind a provider-agnostic interface (`CartPicker`, in `packages/agent-client/src/picker.ts`, implemented by both `LlmToolAgent` and the offline `DeterministicPicker`) — the Anthropic API remains a documented, deferred alternative, swappable in a single file, not a redesign.
 **Deliverables:**
 - A CLI agent that can be invoked in two modes: `--protocol=x402` and `--protocol=ap2`, both attempting to purchase the same test cart against the local gateway.
 - The agent generates its own Ed25519 keypair for the AP2 run and registers its public key via a setup script (simulating merchant-side agent onboarding).

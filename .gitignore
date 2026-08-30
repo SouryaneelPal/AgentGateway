@@ -40,3 +40,7 @@ coverage/
 /postgres-data/
 /redis-data/
 /.docker-data/
+
+# reference agent local artifacts
+packages/agent-client/.agent-keystore.json
+packages/agent-client/traces/
