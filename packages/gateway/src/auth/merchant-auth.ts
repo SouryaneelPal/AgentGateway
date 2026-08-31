@@ -43,14 +43,36 @@ export function hashApiKey(plaintext: string): string {
   return createHash('sha256').update(plaintext, 'utf8').digest('hex');
 }
 
-/** Extracts the bearer token, accepting only a well-formed Authorization header. */
+/**
+ * Extracts the bearer token.
+ *
+ * The Authorization header is the normal path. A single fallback exists: an `api_key`
+ * query parameter, because the browser EventSource API cannot set request headers and
+ * the dashboard's SSE feed would otherwise be unauthenticatable.
+ *
+ * The trade-off is real and worth naming rather than burying: a token in a query string
+ * can land in server access logs and proxy logs in a way a header does not. It is the
+ * SAME credential checked the SAME way — this widens where the token may be carried, not
+ * who may use it — and it is acceptable for a local demo console. A production build
+ * would have the dashboard POST for a short-lived, single-use stream ticket and pass
+ * that instead.
+ */
 export function readBearerToken(request: FastifyRequest): string | null {
   const header = request.headers.authorization;
-  if (typeof header !== 'string') return null;
 
-  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
-  const token = match?.[1]?.trim();
-  return token === undefined || token.length === 0 ? null : token;
+  if (typeof header === 'string') {
+    const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+    const token = match?.[1]?.trim();
+    if (token !== undefined && token.length > 0) return token;
+  }
+
+  const query = request.query;
+  if (typeof query === 'object' && query !== null) {
+    const fromQuery = (query as Record<string, unknown>)['api_key'];
+    if (typeof fromQuery === 'string' && fromQuery.length > 0) return fromQuery.trim();
+  }
+
+  return null;
 }
 
 export interface AuthenticatedMerchant {

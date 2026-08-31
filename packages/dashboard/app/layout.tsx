@@ -1,41 +1,42 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
-import Link from 'next/link';
+import { IBM_Plex_Mono, IBM_Plex_Sans } from 'next/font/google';
+import { Shell } from '../components/Shell';
+import { THEME_BOOTSTRAP } from '../lib/theme';
 import './globals.css';
+
+/**
+ * IBM Plex, for a reason: it was drawn for technical and data-dense interfaces, which is
+ * exactly what a settlement console is. Mono carries every figure, identifier and hash.
+ */
+const sans = IBM_Plex_Sans({
+  subsets: ['latin'],
+  weight: ['400', '500', '600'],
+  variable: '--font-plex-sans',
+  display: 'swap',
+});
+
+const mono = IBM_Plex_Mono({
+  subsets: ['latin'],
+  weight: ['400', '500'],
+  variable: '--font-plex-mono',
+  display: 'swap',
+});
 
 export const metadata: Metadata = {
   title: 'AgentGateway — Merchant Console',
-  description: 'Protocol-agnostic guardrails and audit trail for agent-initiated payments.',
+  description: 'Guardrails, settlement and audit trail for agent-initiated payments.',
 };
-
-const NAV = [
-  { href: '/', label: 'Overview' },
-  { href: '/policy', label: 'Policy' },
-  { href: '/transactions', label: 'Transactions' },
-  { href: '/agents', label: 'Agents' },
-  { href: '/protocol-tester', label: 'Protocol Tester' },
-] as const;
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en">
-      <body className="min-h-screen antialiased">
-        <div className="mx-auto flex min-h-screen max-w-6xl flex-col px-6">
-          <header className="flex flex-wrap items-center gap-x-6 gap-y-3 border-b border-edge py-5">
-            <span className="text-sm font-semibold tracking-tight">AgentGateway</span>
-            <nav className="flex flex-wrap gap-x-5 gap-y-2 text-sm text-ink-muted">
-              {NAV.map((item) => (
-                <Link key={item.href} href={item.href} className="hover:text-ink">
-                  {item.label}
-                </Link>
-              ))}
-            </nav>
-          </header>
-          <main className="flex-1 py-10">{children}</main>
-          <footer className="border-t border-edge py-5 text-xs text-ink-muted">
-            Phase 1 scaffold — screens land in Phase 5. See ROADMAP.md.
-          </footer>
-        </div>
+    <html lang="en" suppressHydrationWarning className={`${sans.variable} ${mono.variable}`}>
+      <head>
+        {/* Sets the theme before first paint so the wrong one never flashes. */}
+        <script dangerouslySetInnerHTML={{ __html: THEME_BOOTSTRAP }} />
+      </head>
+      <body>
+        <Shell>{children}</Shell>
       </body>
     </html>
   );

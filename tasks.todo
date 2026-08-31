@@ -92,16 +92,16 @@ Derived from [ROADMAP.md](ROADMAP.md). Design rationale lives in [WHITEPAPER.md]
 
 ## Phase 5 — Merchant Dashboard & Interactive Protocol Tester
 
-- [ ] Build the policy console for spend caps, blocked categories, and enabled protocols per merchant, writing to `/v1/merchant/policy`
-- [ ] Build the live transaction/audit feed over SSE, showing protocol origin, status, and a link into each request's full audit trail
-- [ ] Build the protocol tester panel: paste or trigger a raw x402/AP2 request from the browser and render the adapter's validate → normalize → settle → receipt steps side by side in real time
-- [ ] Build the agent management view with a one-click revoke button (`POST /v1/merchant/agents/:id/revoke`)
-- [ ] Demonstrate that a revoked agent's next request is rejected immediately
+- [x] Build the policy console for spend caps, blocked categories, and enabled protocols per merchant, writing to `/v1/merchant/policy`
+- [x] Build the live transaction/audit feed over SSE, showing protocol origin, status, and a link into each request's full audit trail
+- [x] Build the protocol tester panel: paste or trigger a raw x402/AP2 request from the browser and render the adapter's validate → normalize → settle → receipt steps side by side in real time
+- [x] Build the agent management view with a one-click revoke button (`POST /v1/merchant/agents/:id/revoke`)
+- [x] Demonstrate that a revoked agent's next request is rejected immediately
 
 **Validation:**
 
-- [ ] Revoking an agent mid-session blocks its next request
-- [ ] The audit trail for a rejected mandate is fully readable by a non-technical viewer without needing to read logs
+- [x] Revoking an agent mid-session blocks its next request
+- [x] The audit trail for a rejected mandate is fully readable by a non-technical viewer without needing to read logs
 
 ## Phase 6 — End-to-End Integration, Chaos Testing & Submission Prep
 
@@ -134,6 +134,43 @@ Derived from [ROADMAP.md](ROADMAP.md). Design rationale lives in [WHITEPAPER.md]
   correctly" — verified only with a **locally-signed** Razorpay-shaped delivery, not one
   sent from the Razorpay dashboard's webhook test-send. That needs real credentials plus
   a publicly reachable URL (ngrok/tunnel) for the gateway.
+
+**Phase 5 — closed 2026-08-31**
+
+- SCOPE WAS LARGER THAN STATED. All six merchant routes the dashboard consumes were
+  still NotImplementedError stubs returning 501, so Phase 5 required building the
+  backend as well as the UI: GET/PUT policy, transactions, audit-log, agents/:id/revoke,
+  and the SSE stream — plus GET /v1/merchant/agents, which §2.4 never listed but an
+  agent-management screen cannot work without.
+- Dashboard auth: paste the merchant API key, held in sessionStorage. Deliberately NOT
+  localStorage — it is a credential, so it dies with the tab. Theme goes to localStorage
+  instead, because a colour scheme is not a secret.
+- Live triggering in the protocol tester is x402 ONLY. Driving AP2 from the browser would
+  mean handing the agent's Ed25519 private key to a browser, which breaks the §3.1
+  guarantee the whole trust model rests on. AP2 replays recorded Phase 4 traces, and the
+  UI says so rather than hiding it.
+- Plain-language audit trail is rendered server-side (explainAuditAction) so every client
+  agrees on the wording, with the raw payload behind a "view raw" toggle.
+- FOUR BUGS FOUND BY LOOKING AT THE UI, not by tests:
+  1. SSE was CORS-blocked in the browser. The handler writes to reply.raw, so
+     @fastify/cors never saw the response — it worked from curl and failed silently in
+     the browser. Headers now set explicitly.
+  2. React key warning: a bare fragment in a .map(). Now a keyed Fragment.
+  3. The tester marked a REJECTED AP2 run as having reached Settle and Receipt, because
+     "reached" was inferred from a trace entry existing rather than from its outcome. It
+     claimed a declined mandate had settled. Now derived from the recorded HTTP status.
+  4. Having fixed (3), x402's challenge then showed as DECLINED — because HTTP 402 is
+     >= 400. 402 is the success case for the protocol named after it; the check now takes
+     per-stage expected statuses.
+- ONE-OFF LOCAL WORKAROUND, NOT CONFIG: an unrelated Next.js app ("DAIC Tech Solutions")
+  on this developer machine holds port 3000 and repeatedly reclaimed it, so the live
+  demo was run with the gateway on 3100 via an env override. Nothing tracked was
+  changed: canonical ports remain gateway :3000 host / :3001 containerised and dashboard
+  :3002, in docker-compose.yml, .env.example, README, next.config.mjs, lib/session.ts and
+  the agent-client CLI defaults. Verified by grepping every tracked file for 3100.
+- One Phase 4.5 test asserted /v1/merchant/policy returns 501 (the stub). Phase 5
+  implemented it, so that assertion moved to 200.
+- Screenshots of both themes are in docs/screenshots/.
 
 **Phase 4.5 — closed 2026-08-31**
 

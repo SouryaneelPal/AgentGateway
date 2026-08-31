@@ -310,6 +310,7 @@ POST /v1/ap2/mandates
 | `GET` | `/v1/merchant/audit-log?payment_request_id=` | Drill into the full decision trail for one transaction |
 | `POST` | `/v1/merchant/agents/:id/revoke` | Immediately revoke an agent identity (sets `revoked_at`, checked on every subsequent request) |
 | `GET` | `/v1/merchant/stream` | SSE stream of live transaction/audit events for the dashboard |
+| `GET` | `/v1/merchant/agents` | List the merchant's agent identities: protocol, trust level, spend against limit, revocation state |
 | `POST` | `/v1/merchant/agents/register` | Onboard an agent identity and register its Ed25519 public key (§3.1 step 1, §3.6) |
 
 **All `/v1/merchant/*` routes require a merchant API key** as `Authorization: Bearer <key>` (§3.6). The merchant a request acts on is derived from that key server-side; `merchantId` is never accepted from the request body or path.
@@ -456,6 +457,8 @@ Adding only the first is a common and dangerous half-fix. If a route authenticat
 - Protocol tester panel: paste or trigger a raw x402/AP2 request from the browser and watch the adapter's validate → normalize → settle → receipt steps rendered side by side in real time — this is the single most demo-able screen in the whole project.
 - Agent management view with a one-click revoke button (`POST /v1/merchant/agents/:id/revoke`), and proof that a revoked agent's next request is rejected immediately.
 **Validation checklist:** revoking an agent mid-session blocks its next request; the audit trail for a rejected mandate is fully readable by a non-technical viewer without needing to read logs.
+
+**Why the protocol tester replays AP2 rather than triggering it live:** the panel can drive a real x402 run from the browser, because x402's proof requires no client-side signature — the gateway issues a one-time reference and the browser simply redeems it. AP2 cannot work that way. Submitting an `IntentMandate` means signing it with the agent's Ed25519 private key, and putting that key in a browser would break the §3.1 guarantee that the private key never leaves the machine holding it — the property that makes a mandate's signature worth anything. So AP2 is replayed from the reference agent's recorded Phase 4 runs, which are real traces against this gateway rather than fixtures, and the panel says so on screen rather than blurring the distinction.
 
 ### Phase 6 — End-to-End Integration, Chaos Testing & Submission Prep
 **Deliverables:**

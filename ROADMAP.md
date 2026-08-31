@@ -65,6 +65,8 @@ Section references (§2.2, §3.4, §3.5, §5.3) point back into WHITEPAPER.md.
 - Agent management view with a one-click revoke button (`POST /v1/merchant/agents/:id/revoke`), and proof that a revoked agent's next request is rejected immediately.
 **Validation checklist:** revoking an agent mid-session blocks its next request; the audit trail for a rejected mandate is fully readable by a non-technical viewer without needing to read logs.
 
+**Why the protocol tester replays AP2 rather than triggering it live:** the panel can drive a real x402 run from the browser, because x402's proof requires no client-side signature — the gateway issues a one-time reference and the browser simply redeems it. AP2 cannot work that way. Submitting an `IntentMandate` means signing it with the agent's Ed25519 private key, and putting that key in a browser would break the §3.1 guarantee that the private key never leaves the machine holding it — the property that makes a mandate's signature worth anything. So AP2 is replayed from the reference agent's recorded Phase 4 runs, which are real traces against this gateway rather than fixtures, and the panel says so on screen rather than blurring the distinction.
+
 ### Phase 6 — End-to-End Integration, Chaos Testing & Submission Prep
 **Deliverables:**
 - **Chaos scenarios**, each scripted and recorded: (1) replay a captured AP2 mandate — must be rejected; (2) fire 20 concurrent spend-cap-adjacent requests from the same agent — exactly the correct number succeed, verified against the cap; (3) deliver a webhook with a tampered signature — rejected and logged, no state change; (4) deliver the *same* legitimate webhook twice — processed once.

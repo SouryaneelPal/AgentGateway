@@ -44,3 +44,8 @@ coverage/
 # reference agent local artifacts
 packages/agent-client/.agent-keystore.json
 packages/agent-client/traces/
+
+# playwright / screenshot artifacts
+.playwright-mcp/
+*.png
+!docs/screenshots/*.png

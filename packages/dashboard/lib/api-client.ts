@@ -1,135 +1,170 @@
 /**
- * Typed client for the merchant-facing routes in WHITEPAPER.md §2.4.
+ * Typed client for the merchant API (§2.4, authenticated per §3.6).
  *
- * The request/response types are declared now so the Phase 5 screens are written
- * against a fixed contract; the gateway handlers currently answer 501, which
- * `request()` surfaces as a typed GatewayError rather than a silent failure.
+ * Every call carries the merchant API key as a bearer token. The key is supplied by the
+ * operator at the door and held in sessionStorage — see lib/session.ts for why that,
+ * rather than localStorage, is the right store for a credential.
  */
 
-const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL ?? 'http://localhost:3000';
+import { getApiKey, GATEWAY_URL } from './session';
 
 export type ProtocolName = 'x402' | 'ap2' | 'fallback';
+export type PaymentStatus = 'pending' | 'awaiting_settlement' | 'settled' | 'failed' | 'rejected';
 
-export type PaymentRequestStatus =
-  'pending' | 'awaiting_settlement' | 'settled' | 'failed' | 'rejected';
-
-/** merchants.policy in §2.3. */
 export interface MerchantPolicy {
-  maxAutoApprovePaise: number;
-  blockedCategories: string[];
-  enabledProtocols: ProtocolName[];
+  merchant_id: string;
+  merchant_name?: string;
+  max_auto_approve_paise: number;
+  blocked_categories: string[];
+  enabled_protocols: ProtocolName[];
 }
 
-/** A row of payment_requests, as the dashboard needs it. */
-export interface TransactionSummary {
-  id: string;
+export interface Transaction {
+  payment_request_id: string;
   protocol: ProtocolName;
-  status: PaymentRequestStatus;
-  normalizedAmountPaise: number;
-  normalizedCurrency: 'INR';
-  rejectionReason: string | null;
-  createdAt: string;
-  updatedAt: string;
+  status: PaymentStatus;
+  rejection_reason: string | null;
+  amount_paise: number;
+  currency: string;
+  agent_identity_id: string;
+  external_agent_id: string;
+  razorpay_order_id: string | null;
+  razorpay_payment_id: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
-/** A row of audit_log (§2.3). */
-export interface AuditLogEntry {
+export interface AuditEntry {
   id: string;
-  actorType: 'agent' | 'merchant' | 'system';
-  actorId: string | null;
+  actor_type: 'agent' | 'merchant' | 'system';
+  actor_id: string | null;
   action: string;
-  paymentRequestId: string | null;
-  detail: Record<string, unknown>;
-  createdAt: string;
+  payment_request_id: string | null;
+  /** Plain-language sentence, rendered by the gateway so every client agrees. */
+  explanation: string;
+  detail: unknown;
+  created_at: string;
 }
 
-export interface AgentIdentitySummary {
-  id: string;
+export interface AgentIdentity {
+  agent_identity_id: string;
   protocol: ProtocolName;
-  externalAgentId: string;
-  trustLevel: 'untrusted' | 'provisional' | 'trusted';
-  spendingLimitPaise: number;
-  spentPaise: number;
-  revokedAt: string | null;
+  external_agent_id: string;
+  trust_level: 'untrusted' | 'provisional' | 'trusted';
+  has_public_key: boolean;
+  spending_limit_paise: number;
+  spent_paise: number;
+  remaining_paise: number;
+  revoked_at: string | null;
+  created_at: string;
 }
 
-export interface TransactionFilters {
-  status?: PaymentRequestStatus;
-  protocol?: ProtocolName;
-}
-
-export class GatewayError extends Error {
+export class ApiError extends Error {
   readonly status: number;
   readonly body: unknown;
 
   constructor(status: number, body: unknown, message: string) {
     super(message);
-    this.name = 'GatewayError';
+    this.name = 'ApiError';
     this.status = status;
     this.body = body;
   }
+
+  /** True when the key is missing, wrong or revoked — the door needs reopening. */
+  get isAuthFailure(): boolean {
+    return this.status === 401;
+  }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+/**
+ * Builds the Authorization header. Exported so it can be tested directly: attaching the
+ * key to every call is the one thing in this client that must never silently regress.
+ */
+export function authHeaders(apiKey: string | null): Record<string, string> {
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (apiKey !== null && apiKey.length > 0) {
+    headers.authorization = `Bearer ${apiKey}`;
+  }
+  return headers;
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${GATEWAY_URL}${path}`, {
     ...init,
-    headers: { 'content-type': 'application/json', ...init?.headers },
+    headers: { ...authHeaders(getApiKey()), ...init.headers },
     cache: 'no-store',
   });
 
   const body: unknown = await response.json().catch(() => null);
 
   if (!response.ok) {
-    const message =
-      typeof body === 'object' && body !== null && 'message' in body
-        ? String((body as { message: unknown }).message)
-        : `${init?.method ?? 'GET'} ${path} failed with ${response.status}`;
-    throw new GatewayError(response.status, body, message);
+    const detail =
+      typeof body === 'object' && body !== null && 'detail' in body
+        ? String((body as { detail: unknown }).detail)
+        : typeof body === 'object' && body !== null && 'error' in body
+          ? String((body as { error: unknown }).error)
+          : `${init.method ?? 'GET'} ${path} failed`;
+    throw new ApiError(response.status, body, detail);
   }
 
   return body as T;
 }
 
-/** GET /v1/merchant/policy — fetch current guardrails. */
 export function getPolicy(): Promise<MerchantPolicy> {
   return request<MerchantPolicy>('/v1/merchant/policy');
 }
 
-/** PUT /v1/merchant/policy — update spend caps, blocked categories, enabled protocols. */
-export function updatePolicy(policy: MerchantPolicy): Promise<MerchantPolicy> {
+export function updatePolicy(input: {
+  max_auto_approve_paise: number;
+  blocked_categories: string[];
+  enabled_protocols: ProtocolName[];
+}): Promise<MerchantPolicy> {
   return request<MerchantPolicy>('/v1/merchant/policy', {
     method: 'PUT',
-    body: JSON.stringify(policy),
+    body: JSON.stringify(input),
   });
 }
 
-/** GET /v1/merchant/transactions?status=&protocol= — unified cross-protocol log. */
-export function listTransactions(filters: TransactionFilters = {}): Promise<TransactionSummary[]> {
+export function listTransactions(filters: { status?: string; protocol?: string } = {}): Promise<{
+  transactions: Transaction[];
+}> {
   const query = new URLSearchParams();
-  if (filters.status !== undefined) query.set('status', filters.status);
-  if (filters.protocol !== undefined) query.set('protocol', filters.protocol);
+  if (filters.status) query.set('status', filters.status);
+  if (filters.protocol) query.set('protocol', filters.protocol);
   const suffix = query.size > 0 ? `?${query.toString()}` : '';
-  return request<TransactionSummary[]>(`/v1/merchant/transactions${suffix}`);
+  return request<{ transactions: Transaction[] }>(`/v1/merchant/transactions${suffix}`);
 }
 
-/** GET /v1/merchant/audit-log?payment_request_id= — full decision trail for one request. */
-export function getAuditLog(paymentRequestId: string): Promise<AuditLogEntry[]> {
-  const query = new URLSearchParams({ payment_request_id: paymentRequestId });
-  return request<AuditLogEntry[]>(`/v1/merchant/audit-log?${query.toString()}`);
+export function getAuditLog(paymentRequestId?: string): Promise<{ entries: AuditEntry[] }> {
+  const suffix =
+    paymentRequestId === undefined
+      ? ''
+      : `?payment_request_id=${encodeURIComponent(paymentRequestId)}`;
+  return request<{ entries: AuditEntry[] }>(`/v1/merchant/audit-log${suffix}`);
 }
 
-/** POST /v1/merchant/agents/:id/revoke — immediately revoke an agent identity. */
-export function revokeAgent(agentId: string): Promise<AgentIdentitySummary> {
-  return request<AgentIdentitySummary>(
-    `/v1/merchant/agents/${encodeURIComponent(agentId)}/revoke`,
-    { method: 'POST' },
-  );
+export function listAgents(): Promise<{ agents: AgentIdentity[] }> {
+  return request<{ agents: AgentIdentity[] }>('/v1/merchant/agents');
+}
+
+export function revokeAgent(agentId: string): Promise<{
+  agent_identity_id: string;
+  external_agent_id: string;
+  revoked_at: string;
+  already_revoked: boolean;
+}> {
+  return request(`/v1/merchant/agents/${encodeURIComponent(agentId)}/revoke`, { method: 'POST' });
 }
 
 /**
- * GET /v1/merchant/stream — SSE stream of live transaction/audit events.
- * Returns the EventSource so the caller owns its lifecycle.
+ * Opens the SSE feed.
+ *
+ * EventSource cannot send an Authorization header, so the key travels as a query
+ * parameter here. That is a real trade-off and worth naming: it means the key can land
+ * in server access logs. Acceptable for a local demo console; a production build would
+ * use a short-lived stream ticket minted by an authenticated POST instead.
  */
-export function openEventStream(): EventSource {
-  return new EventSource(`${GATEWAY_URL}/v1/merchant/stream`);
+export function openStream(): EventSource {
+  const key = getApiKey() ?? '';
+  return new EventSource(`${GATEWAY_URL}/v1/merchant/stream?api_key=${encodeURIComponent(key)}`);
 }

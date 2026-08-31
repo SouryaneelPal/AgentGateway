@@ -134,18 +134,21 @@ describe('every /v1/merchant/* route requires authentication', () => {
     expect(response.statusCode).toBe(401);
   });
 
-  it('accepts a valid key — 401 gone (501 is the Phase 5 stub, i.e. past auth)', async () => {
-    const { apiKey } = await seedMerchantWithKey();
+  it('accepts a valid key and serves the route', async () => {
+    // This asserted 501 while /v1/merchant/policy was still a Phase 5 stub. Phase 5
+    // implemented it, so the expectation moves to 200 — the point of the test is
+    // unchanged: a valid key gets past authentication.
+    const { merchantId, apiKey } = await seedMerchantWithKey();
 
-    for (const route of [{ method: 'GET' as const, url: '/v1/merchant/policy' }]) {
-      const response = await app.inject({
-        method: route.method,
-        url: route.url,
-        headers: { authorization: `Bearer ${apiKey}` },
-      });
-      expect(response.statusCode).not.toBe(401);
-      expect(response.statusCode).toBe(501);
-    }
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/merchant/policy',
+      headers: { authorization: `Bearer ${apiKey}` },
+    });
+
+    expect(response.statusCode).not.toBe(401);
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ merchant_id: merchantId });
   });
 
   it('accepts a valid key on agents/register and derives the merchant from it', async () => {
