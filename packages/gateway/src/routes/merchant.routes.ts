@@ -7,6 +7,22 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { NotImplementedError } from '../errors.js';
 import { prisma } from '../db/prisma-client.js';
+import { env } from '../config/env.js';
+
+/** Caps on free-text identifiers accepted by the demo onboarding route. */
+const MAX_IDENTIFIER_LENGTH = 128;
+/** ₹10,00,000. Generous for test mode, finite by design. */
+const MAX_SPENDING_LIMIT_PAISE = 100_000_000;
+
+/** An Ed25519 public key is exactly 32 bytes, base64-encoded. */
+function isEd25519PublicKey(value: unknown): boolean {
+  if (typeof value !== 'string' || value.length === 0) return false;
+  try {
+    return Buffer.from(value, 'base64').length === 32;
+  } catch {
+    return false;
+  }
+}
 
 interface AgentParams {
   readonly id: string;
@@ -37,6 +53,13 @@ export const merchantRoutes: FastifyPluginAsync = async (app) => {
    * merchant authentication (§5.4's production-hardening note).
    */
   app.post('/v1/merchant/agents/register', async (request, reply) => {
+    // HARD KILL-SWITCH. This route is unauthenticated (Phase 4.5 will fix that); until
+    // then it must be physically incapable of serving outside development, rather than
+    // relying on nobody deploying it by accident.
+    if (env.NODE_ENV === 'production') {
+      return reply.code(404).send({ error: 'not_found' });
+    }
+
     const body = request.body;
 
     if (typeof body !== 'object' || body === null || Array.isArray(body)) {
@@ -54,16 +77,27 @@ export const merchantRoutes: FastifyPluginAsync = async (app) => {
     if (protocol !== 'x402' && protocol !== 'ap2' && protocol !== 'fallback') {
       return reply.code(400).send({ error: 'malformed_request', detail: 'invalid protocol' });
     }
-    if (typeof externalAgentId !== 'string' || externalAgentId.length === 0) {
-      return reply
-        .code(400)
-        .send({ error: 'malformed_request', detail: 'externalAgentId required' });
+    if (
+      typeof externalAgentId !== 'string' ||
+      externalAgentId.length === 0 ||
+      externalAgentId.length > MAX_IDENTIFIER_LENGTH
+    ) {
+      return reply.code(400).send({
+        error: 'malformed_request',
+        detail: `externalAgentId required, max ${MAX_IDENTIFIER_LENGTH} chars`,
+      });
     }
     // §3.1: an AP2 agent without a registered public key can never be verified.
-    if (protocol === 'ap2' && (typeof publicKey !== 'string' || publicKey.length === 0)) {
-      return reply
-        .code(400)
-        .send({ error: 'malformed_request', detail: 'publicKey is required for ap2 agents' });
+    if (protocol === 'ap2' && !isEd25519PublicKey(publicKey)) {
+      // Accepting an arbitrary string would store a key that can never verify anything,
+      // turning a registration-time error into a confusing signature failure much later.
+      return reply.code(400).send({
+        error: 'malformed_request',
+        detail: 'publicKey must be a base64-encoded 32-byte Ed25519 public key',
+      });
+    }
+    if (publicKey !== undefined && !isEd25519PublicKey(publicKey)) {
+      return reply.code(400).send({ error: 'malformed_request', detail: 'publicKey is malformed' });
     }
 
     let resolvedMerchantId: string;
@@ -78,6 +112,15 @@ export const merchantRoutes: FastifyPluginAsync = async (app) => {
       }
       resolvedMerchantId = merchant.id;
     } else {
+      if (
+        merchantName !== undefined &&
+        (typeof merchantName !== 'string' || merchantName.length > MAX_IDENTIFIER_LENGTH)
+      ) {
+        return reply.code(400).send({
+          error: 'malformed_request',
+          detail: `merchantName max ${MAX_IDENTIFIER_LENGTH} chars`,
+        });
+      }
       const name =
         typeof merchantName === 'string' && merchantName.length > 0
           ? merchantName
@@ -98,10 +141,23 @@ export const merchantRoutes: FastifyPluginAsync = async (app) => {
         ).id;
     }
 
-    const limit =
-      typeof spendingLimitPaise === 'number' && Number.isInteger(spendingLimitPaise)
-        ? BigInt(spendingLimitPaise)
-        : 1_000_000n;
+    // Number.isInteger(-5) is true, so the previous check happily accepted a NEGATIVE
+    // spending limit. Range is validated now, not just integrality.
+    if (spendingLimitPaise !== undefined) {
+      if (
+        typeof spendingLimitPaise !== 'number' ||
+        !Number.isInteger(spendingLimitPaise) ||
+        spendingLimitPaise < 0 ||
+        spendingLimitPaise > MAX_SPENDING_LIMIT_PAISE
+      ) {
+        return reply.code(400).send({
+          error: 'malformed_request',
+          detail: `spendingLimitPaise must be an integer between 0 and ${MAX_SPENDING_LIMIT_PAISE}`,
+        });
+      }
+    }
+
+    const limit = typeof spendingLimitPaise === 'number' ? BigInt(spendingLimitPaise) : 1_000_000n;
 
     const agent = await prisma.agentIdentity.upsert({
       where: {
@@ -122,9 +178,13 @@ export const merchantRoutes: FastifyPluginAsync = async (app) => {
       update: {
         publicKey: typeof publicKey === 'string' ? publicKey : null,
         spendingLimitPaise: limit,
-        // Re-registering an agent clears a prior revocation, which is what a merchant
-        // re-onboarding an agent means.
-        revokedAt: null,
+        // revokedAt is deliberately NOT cleared here. An earlier version reset it on
+        // re-registration, reasoning that re-onboarding implies reinstatement — but on
+        // an unauthenticated route that means ANYONE can un-revoke a revoked agent by
+        // re-registering it, defeating the revocation guardrail outright (§2.4's revoke
+        // endpoint, and the Phase 5 requirement that revoking an agent blocks its very
+        // next request). Reinstatement must be an explicit, merchant-authenticated
+        // action, never a side effect of registration.
       },
       select: { id: true, protocol: true, externalAgentId: true, trustLevel: true },
     });

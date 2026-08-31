@@ -138,6 +138,17 @@ export async function cleanup(seeded: SeededAgent): Promise<void> {
 
   await prisma.auditLog.deleteMany({ where: { paymentRequestId: { in: requestIds } } });
   await prisma.auditLog.deleteMany({ where: { actorId: seeded.agentIdentityId } });
+  // The agent-registration route logs with actorType 'merchant' and actorId = the
+  // MERCHANT id, so those rows are not covered by the agent-id sweep above and would
+  // otherwise be left orphaned once the merchant is deleted.
+  await prisma.auditLog.deleteMany({ where: { actorId: seeded.merchantId } });
+  const agentIds = await prisma.agentIdentity.findMany({
+    where: { merchantId: seeded.merchantId },
+    select: { id: true },
+  });
+  await prisma.auditLog.deleteMany({
+    where: { actorId: { in: agentIds.map((a) => a.id) } },
+  });
   // mandates / razorpay_orders / receipts cascade from payment_requests (§2.3).
   await prisma.paymentRequest.deleteMany({ where: { merchantId: seeded.merchantId } });
   await prisma.agentIdentity.deleteMany({ where: { merchantId: seeded.merchantId } });

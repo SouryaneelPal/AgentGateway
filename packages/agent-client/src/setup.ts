@@ -10,7 +10,7 @@
  * gateway" — enforced by where the code runs, not by policy.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { generateKeypair, type Ed25519Keypair } from './ap2-client.js';
 
@@ -35,10 +35,27 @@ export function loadKeystore(path: string = DEFAULT_KEYSTORE_PATH): AgentKeystor
   }
 }
 
+/** Owner-only. This file holds the agent's Ed25519 PRIVATE key. */
+const KEYSTORE_FILE_MODE = 0o600;
+const KEYSTORE_DIR_MODE = 0o700;
+
 function saveKeystore(keystore: AgentKeystore, path: string): string {
   const absolute = resolve(path);
-  mkdirSync(dirname(absolute), { recursive: true });
-  writeFileSync(absolute, `${JSON.stringify(keystore, null, 2)}\n`, 'utf8');
+
+  // The private key in this file is what authorizes AP2 mandates — i.e. what authorizes
+  // spending. writeFileSync defaults to 0644 (minus umask), which on a shared machine
+  // leaves it readable by every local user.
+  mkdirSync(dirname(absolute), { recursive: true, mode: KEYSTORE_DIR_MODE });
+  writeFileSync(absolute, `${JSON.stringify(keystore, null, 2)}\n`, {
+    encoding: 'utf8',
+    mode: KEYSTORE_FILE_MODE,
+  });
+
+  // `mode` above only applies when the file is CREATED. Re-running setup over an
+  // existing keystore would otherwise silently keep whatever permissions that file
+  // already had, so the mode is asserted explicitly afterwards.
+  chmodSync(absolute, KEYSTORE_FILE_MODE);
+
   return absolute;
 }
 
@@ -129,7 +146,7 @@ export async function runSetup(options: SetupOptions): Promise<AgentKeystore> {
   console.log('  Ed25519 PUBLIC KEY (registered with the gateway):');
   console.log(`  ${keypair.publicKeyBase64}`);
   console.log('');
-  console.log(`  private key stored locally, never sent: ${saved}`);
+  console.log(`  private key stored locally (owner-only, 0600), never sent: ${saved}`);
   console.log('============================================================\n');
 
   return keystore;
