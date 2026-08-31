@@ -297,35 +297,29 @@ Rotating that key makes every previously-stored merchant secret undecryptable.
 
 ---
 
-## Current status — Phase 1 complete
+## Current status — all phases complete
 
-This repository is at the **Phase 1** boundary: foundation and infrastructure. What that
-means concretely:
+Every phase in [ROADMAP.md](ROADMAP.md) is implemented and verified against Razorpay
+test mode with live credentials.
 
-**Built for real**
+| Phase | What it delivered                                                                 |
+| ----- | --------------------------------------------------------------------------------- |
+| 0–1   | Monorepo, Docker stack, Prisma schema transcribed 1:1 from §2.3, `/health`        |
+| 2     | Row-locked spend cap (§3.5), webhook HMAC verification (§3.4), Razorpay client    |
+| 3     | x402 / AP2 / fallback adapters, Ed25519 + JCS, two-layer replay protection (§3.2) |
+| 4     | Reference AI agent — both protocols, one cart, provider-agnostic reasoning layer  |
+| 4.5   | Merchant API keys, tenant isolation, secrets encrypted at rest, rate limiting     |
+| 5     | Merchant console: guardrails, live audit feed, agent revocation, protocol tester  |
+| 6     | Chaos scenarios, load profile, this README, demo script                           |
 
-- Fastify server, graceful shutdown, typed error handling (501 for anything unimplemented).
-- `/health` checking Postgres (raw Prisma query) and Redis.
-- Environment config module with schema validation and a committed `.env.example`.
-- Prisma schema transcribed 1:1 from §2.3 — eight tables, all indexes, all unique
-  constraints, all six `CHECK` constraints.
-- `razorpay-client.ts` — typed `createOrder` / `createPaymentLink` / `capturePayment`
-  against the real test-mode SDK.
-- `webhook-signature.ts` — HMAC-SHA256 verification over the **raw** body with a
-  constant-time comparison (§3.4), plus raw-body capture wired into Fastify's
-  content-type parser, and unit tests covering tampering, wrong secret, wrong body,
-  wrong length and the re-serialisation trap.
+**Evidence, not assertions:**
 
-**Scaffolded as typed stubs (throw `NotImplementedError`)**
-
-- The three protocol adapters, against the exact `ProtocolAdapter` interface from §2.2.
-- Policy Engine and the §3.5 row-locked spend-cap check.
-- Idempotency Engine (§3.3 key derivation and insert-or-fetch).
-- Ed25519 verification and JSON canonicalization (§3.1).
-- Every route in §2.4, returning 501 with the phase it lands in.
-- The dashboard's five screens and the reference agent's CLI.
-
----
+- [docs/chaos-report.md](docs/chaos-report.md) — four chaos scenarios run live against a
+  running gateway, with before/after state
+- [docs/load-profile.md](docs/load-profile.md) — latency under rising concurrency, with
+  an honest account of what the numbers do and don't mean
+- [docs/screenshots/](docs/screenshots/) — the console in both themes
+- [docs/demo-script.md](docs/demo-script.md) — the 5-minute walkthrough
 
 ## Roadmap
 
@@ -339,14 +333,52 @@ protocol tester, and end-to-end chaos testing — are specified in
 
 ## Known limitations
 
-Carried forward from [WHITEPAPER.md](WHITEPAPER.md) §5.4, stated honestly rather than hidden:
+Stated plainly rather than hidden. The first three are carried from
+[WHITEPAPER.md](WHITEPAPER.md) §5.4; the rest were found while building and are recorded
+because a limitation you discovered and wrote down is worth more than one you didn't.
 
-- x402's reference implementation assumes on-chain stablecoin settlement. This build
-  reinterprets its HTTP-402 _shape_ onto Razorpay's INR rails rather than implementing
-  literal token transfers — a deliberate substitution, documented as such.
-- UAP is not implemented, because it is not yet a public, stable, RBI-approved
-  specification to build against. The adapter pattern is designed so it can be added the
-  moment it is.
-- This is a test-mode build. Production hardening — mTLS between gateway and merchant
-  systems, per-agent rate limiting, multi-region webhook redundancy — is explicit future
-  work, not silently assumed to already exist.
+**Protocol scope**
+
+- **x402 is reinterpreted, not reimplemented.** Its reference implementation assumes
+  on-chain stablecoin settlement. This build maps the HTTP-402 _shape_ onto Razorpay's
+  INR rails: the envelope carries a Razorpay reference rather than a token contract, and
+  "payment proof" is a signed reference to a `payment_id` rather than a transaction hash.
+  A deliberate substitution, called out rather than glossed.
+- **UAP is not implemented.** There is no public, stable, RBI-approved specification to
+  build against yet. The `ProtocolAdapter` interface exists so it becomes one new class
+  when there is — not a rewrite.
+- **Test mode only.** mTLS between gateway and merchant systems, and multi-region webhook
+  redundancy, are future work.
+
+**Deliberate deferrals**
+
+- **AP2 cannot be triggered live from the dashboard.** Signing an `IntentMandate` needs
+  the agent's Ed25519 private key, and putting that in a browser would break the §3.1
+  guarantee that the key never leaves the machine holding it. The protocol tester replays
+  real recorded runs for AP2 and drives x402 live, which needs no client-side signature.
+- **`capturePayment` is unit-tested only.** Razorpay auto-captures in this configuration,
+  so no flow calls it. The wrapper exists so a future manual-capture flow has a typed
+  entry point.
+- **The agent-onboarding route is demo-grade.** `POST /v1/merchant/agents/register` is
+  authenticated, but a production onboarding flow belongs behind a merchant portal, not
+  an API key that can mint its own agents.
+
+**Known behavioural gaps**
+
+- **A failed settlement strands budget.** The spend cap is debited when the Policy Engine
+  approves, _before_ `settle()` calls Razorpay. If that call fails, the request is marked
+  `failed` but the debit stands. The cap is never _exceeded_, so this is not a safety
+  bug — but budget can be stranded, and releasing the debit on a failed settle is real
+  future work. Observed live under 20 simultaneous Razorpay calls.
+- **The fallback path does not consume the spend cap at request time.** A Payment Link is
+  a human-approval flow, so the Policy Engine returns before the cap is debited. Enforcing
+  it at webhook-settlement time is the correct fix and is not done.
+- **Razorpay's own rate limiting is indistinguishable from ours at the client.** Both
+  surface as HTTP 429 through the same error handler. See
+  [docs/load-profile.md](docs/load-profile.md).
+
+**Operational**
+
+- The demo relies on OpenRouter's free tier for the agent's reasoning layer, which has
+  returned upstream 502s during verification. The deterministic picker is the designed
+  fallback; see the hedge in [docs/demo-script.md](docs/demo-script.md).

@@ -112,6 +112,12 @@ export async function buildServer(): Promise<FastifyInstance> {
    */
   await app.register(rateLimit, {
     global: true,
+    // MUST run at preHandler, not the default onRequest. keyGenerator needs the parsed
+    // body to read agentId, and at onRequest the body has not been parsed yet — so
+    // readAgentIdentityHint always saw undefined and every agent silently shared one
+    // IP-keyed bucket. The limiter still limited, which is why nothing failed and the
+    // defect survived Phase 4.5: it was doing a different job than the one documented.
+    hook: 'preHandler',
     max: (request) => (request.url.startsWith('/v1/merchant/') ? merchantMax : agentMax),
     timeWindow: (request) =>
       request.url.startsWith('/v1/merchant/') ? merchantWindow : agentWindow,

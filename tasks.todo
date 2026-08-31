@@ -105,17 +105,17 @@ Derived from [ROADMAP.md](ROADMAP.md). Design rationale lives in [WHITEPAPER.md]
 
 ## Phase 6 — End-to-End Integration, Chaos Testing & Submission Prep
 
-- [ ] Script and record chaos scenario 1: replay a captured AP2 mandate — must be rejected
-- [ ] Script and record chaos scenario 2: fire 20 concurrent spend-cap-adjacent requests from the same agent — exactly the correct number succeed, verified against the cap
-- [ ] Script and record chaos scenario 3: deliver a webhook with a tampered signature — rejected and logged, no state change
-- [ ] Script and record chaos scenario 4: deliver the same legitimate webhook twice — processed once
-- [ ] Write a load/latency profiling script hitting `/v1/ap2/mandates` at increasing concurrency, reporting p50/p95 latency
-- [ ] Write the README with the architecture diagram, setup instructions, and an explicit "known limitations" section (§5.3)
-- [ ] Write the 5-minute demo video script: (1) the problem in 30 seconds, (2) the trust-boundary rule stated on camera, (3) both protocol flows completing live, (4) the spend-cap breach handled gracefully on camera, (5) the audit trail for that exact failure shown in the dashboard
+- [x] Script and record chaos scenario 1: replay a captured AP2 mandate — must be rejected
+- [x] Script and record chaos scenario 2: fire 20 concurrent spend-cap-adjacent requests from the same agent — exactly the correct number succeed, verified against the cap
+- [x] Script and record chaos scenario 3: deliver a webhook with a tampered signature — rejected and logged, no state change
+- [x] Script and record chaos scenario 4: deliver the same legitimate webhook twice — processed once
+- [x] Write a load/latency profiling script hitting `/v1/ap2/mandates` at increasing concurrency, reporting p50/p95 latency
+- [x] Write the README with the architecture diagram, setup instructions, and an explicit "known limitations" section (§5.3)
+- [x] Write the 5-minute demo video script: (1) the problem in 30 seconds, (2) the trust-boundary rule stated on camera, (3) both protocol flows completing live, (4) the spend-cap breach handled gracefully on camera, (5) the audit trail for that exact failure shown in the dashboard
 
 **Validation:**
 
-- [ ] Every chaos scenario has a corresponding, visible entry in the audit trail
+- [x] Every chaos scenario has a corresponding, visible entry in the audit trail
 - [ ] The video shows one real failure end-to-end, not just a success path
 
 ## Notes
@@ -134,6 +134,41 @@ Derived from [ROADMAP.md](ROADMAP.md). Design rationale lives in [WHITEPAPER.md]
   correctly" — verified only with a **locally-signed** Razorpay-shaped delivery, not one
   sent from the Razorpay dashboard's webhook test-send. That needs real credentials plus
   a publicly reachable URL (ngrok/tunnel) for the gateway.
+
+**Phase 6 — closed 2026-08-31**
+
+- LEFT UNCHECKED: "The video shows one real failure end-to-end." The SCRIPT for it is
+  written and the failure it calls for is verified working, but no video has been
+  recorded — that is a human filming task, not something to tick on their behalf.
+
+
+- All four chaos scenarios PASS live against a running gateway; output in
+  docs/chaos-report.md. Scenario 4 replays the real triple-event behaviour observed on
+  2026-08-30: six deliveries, three stored events, exactly one settlement.
+- TWO BUGS FOUND BY MEASURING RATHER THAN ASSUMING:
+  1. Per-agent rate limiting did not work. @fastify/rate-limit's keyGenerator runs in an
+     onRequest hook, before body parsing, so the agentId read from the body was always
+     undefined and EVERY agent silently shared one IP-keyed bucket. The limiter still
+     limited, just on the wrong key, which is why it survived Phase 4.5 and its tests.
+     Fixed with hook: 'preHandler'; regression test added (test/rate-limit-keying.test.ts)
+     asserting two agents get independent budgets.
+  2. The first load-test run reported "2900 req/s" with ZERO accepted requests — it was
+     measuring the latency of being rate-limited. 429s now have their own column and are
+     excluded from the percentile sample.
+- LOAD PROFILE IS BOUNDED BY RAZORPAY, NOT THE GATEWAY. With our own limiter raised out
+  of the way and verified not to fire, the remaining 429s come from Razorpay's API
+  throttling concurrent order creation. The concurrency-1 row (p50 ~106ms, p95 ~145ms) is
+  the meaningful measurement; above that the report measures graceful degradation. Stated
+  plainly in docs/load-profile.md rather than presented as a throughput number.
+- FINDING, not fixed: a failed settlement strands budget. The spend cap is debited when
+  the Policy Engine approves, before settle() calls Razorpay; if that call fails the
+  request is marked failed but the debit stands. The cap is never exceeded, so it is not a
+  safety bug. Recorded in README known limitations.
+- Chaos-scenario audit trails verified VISIBLE IN THE DASHBOARD, not just via SQL:
+  the rejected row expands to "Declined: the agent asked to spend Rs 250.00 but only
+  Rs 10.00 was left on its spending limit. No payment was created and no money moved."
+- Demo script at docs/demo-script.md, with an explicit hedge on the Nemotron/OpenRouter
+  502 flakiness: demo x402 live, pre-record or run AP2 deterministically.
 
 **Phase 5 — closed 2026-08-31**
 
