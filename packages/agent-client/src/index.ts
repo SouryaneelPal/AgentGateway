@@ -97,18 +97,24 @@ program
   .description('Generate an Ed25519 keypair and register the agent with the gateway')
   .option('--gateway-url <url>', 'AgentGateway base URL', 'http://localhost:3000')
   .option('--keystore <path>', 'where to store the agent keypair', DEFAULT_KEYSTORE_PATH)
-  .option('--merchant-name <name>', 'merchant to onboard against', 'agent-client-demo-merchant')
+  .option('--api-key <key>', 'merchant API key (or set MERCHANT_API_KEY)', '')
   .option('--limit <paise>', 'spending limit in paise', '1000000')
-  .action(
-    async (opts: { gatewayUrl: string; keystore: string; merchantName: string; limit: string }) => {
-      await runSetup({
-        gatewayUrl: opts.gatewayUrl,
-        keystorePath: opts.keystore,
-        merchantName: opts.merchantName,
-        spendingLimitPaise: Number(opts.limit),
-      });
-    },
-  );
+  .action(async (opts: { gatewayUrl: string; keystore: string; apiKey: string; limit: string }) => {
+    const apiKey = opts.apiKey.length > 0 ? opts.apiKey : (process.env['MERCHANT_API_KEY'] ?? '');
+    if (apiKey.length === 0) {
+      throw new Error(
+        'a merchant API key is required. Mint one with:\n' +
+          '  npm run merchant:create --workspace=gateway -- --name "My Merchant"\n' +
+          'then pass --api-key <key> or set MERCHANT_API_KEY',
+      );
+    }
+    await runSetup({
+      gatewayUrl: opts.gatewayUrl,
+      keystorePath: opts.keystore,
+      apiKey,
+      spendingLimitPaise: Number(opts.limit),
+    });
+  });
 
 program
   .command('run', { isDefault: true })

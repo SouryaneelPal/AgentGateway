@@ -10,6 +10,8 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
+import rateLimit from '@fastify/rate-limit';
+import { readBearerToken, hashApiKey } from './auth/merchant-auth.js';
 
 import { env } from './config/env.js';
 import { NotImplementedError, PolicyRejectionError } from './errors.js';
@@ -22,7 +24,35 @@ import { merchantRoutes } from './routes/merchant.routes.js';
 import { disconnectDatabase } from './db/prisma-client.js';
 import { disconnectRedis } from './redis/redis-client.js';
 
+/**
+ * Best-effort attribution of a payment-facing request to an agent identity, for rate
+ * limiting only. Deliberately shallow: this runs before validation, so it must never
+ * throw and must never be treated as authentication.
+ */
+function readAgentIdentityHint(request: { body?: unknown; query?: unknown }): string | null {
+  const fromBody = request.body;
+  if (typeof fromBody === 'object' && fromBody !== null && !Array.isArray(fromBody)) {
+    const agentId = (fromBody as Record<string, unknown>)['agentId'];
+    if (typeof agentId === 'string' && agentId.length > 0 && agentId.length <= 128) {
+      return agentId;
+    }
+  }
+  const fromQuery = request.query;
+  if (typeof fromQuery === 'object' && fromQuery !== null) {
+    const agentId = (fromQuery as Record<string, unknown>)['agentId'];
+    if (typeof agentId === 'string' && agentId.length > 0 && agentId.length <= 128) {
+      return agentId;
+    }
+  }
+  return null;
+}
+
 export async function buildServer(): Promise<FastifyInstance> {
+  const merchantMax = env.RATE_LIMIT_MERCHANT_MAX;
+  const merchantWindow = env.RATE_LIMIT_MERCHANT_WINDOW_MS;
+  const agentMax = env.RATE_LIMIT_AGENT_MAX;
+  const agentWindow = env.RATE_LIMIT_AGENT_WINDOW_MS;
+
   const app = Fastify({
     // Silent under test: the suite asserts on database state and HTTP responses, and
     // request logs would bury the actual results.
@@ -70,6 +100,47 @@ export async function buildServer(): Promise<FastifyInstance> {
     },
   );
 
+  /**
+   * Rate limiting (Phase 4.5).
+   *
+   * Keyed by WHO is calling, not by IP: agents and dashboards sit behind NAT and proxies,
+   * so an IP-keyed limit would either punish co-located callers or be trivially evaded.
+   *   - /v1/merchant/*  -> keyed on the merchant API key (hashed; never log the key)
+   *   - everything else -> keyed on the agent identity when the request carries one,
+   *                        falling back to IP for unattributable traffic
+   * Limits come from env so a load test or demo can raise them without a code change.
+   */
+  await app.register(rateLimit, {
+    global: true,
+    max: (request) => (request.url.startsWith('/v1/merchant/') ? merchantMax : agentMax),
+    timeWindow: (request) =>
+      request.url.startsWith('/v1/merchant/') ? merchantWindow : agentWindow,
+    keyGenerator: (request) => {
+      if (request.url.startsWith('/v1/merchant/')) {
+        const token = readBearerToken(request);
+        // Hash so the raw key never reaches the limiter's store or any log line.
+        return token === null ? `ip:${request.ip}` : `mk:${hashApiKey(token)}`;
+      }
+      const agentId = readAgentIdentityHint(request);
+      return agentId === null ? `ip:${request.ip}` : `agent:${agentId}`;
+    },
+    // The webhook route must never be throttled: dropping a settlement confirmation
+    // because Razorpay burst is far worse than the burst itself (§1.3).
+    allowList: (request) => request.url.startsWith('/webhooks/'),
+    // statusCode MUST be included here. The plugin turns this object into a thrown
+    // error, which then reaches the global error handler below — and without an explicit
+    // statusCode that handler saw an unrecognised error and mapped it to 500. The limit
+    // was enforcing correctly the whole time (x-ratelimit-remaining hit 0), but callers
+    // were told "internal_error" instead of "back off", which is exactly the wrong
+    // signal: a 500 invites a retry, a 429 does not.
+    errorResponseBuilder: (_request, context) => ({
+      statusCode: 429,
+      error: 'rate_limit_exceeded',
+      detail: `too many requests — limit ${context.max} per ${context.after}`,
+      retry_after_seconds: Math.ceil(context.ttl / 1000),
+    }),
+  });
+
   await app.register(cors, {
     // The dashboard (Phase 5) is a separate origin in development.
     origin: env.NODE_ENV === 'development' ? true : false,
@@ -91,6 +162,15 @@ export async function buildServer(): Promise<FastifyInstance> {
 
     if (error instanceof PolicyRejectionError) {
       return reply.code(403).send({ error: error.code, ...error.detail });
+    }
+
+    // @fastify/rate-limit signals throttling with this code; surface it as 429 even if
+    // an upstream builder omits statusCode.
+    if (error.code === 'FST_ERR_RATE_LIMIT' || error.statusCode === 429) {
+      return reply.code(429).send({
+        error: 'rate_limit_exceeded',
+        detail: error.message,
+      });
     }
 
     request.log.error({ err: error }, 'unhandled error');

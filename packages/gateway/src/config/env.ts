@@ -28,6 +28,20 @@ const EnvSchema = z.object({
   RAZORPAY_KEY_ID: z.string().min(1, 'RAZORPAY_KEY_ID is required (test mode)'),
   RAZORPAY_KEY_SECRET: z.string().min(1, 'RAZORPAY_KEY_SECRET is required (test mode)'),
   RAZORPAY_WEBHOOK_SECRET: z.string().min(1, 'RAZORPAY_WEBHOOK_SECRET is required'),
+
+  // Phase 4.5 — AES-256-GCM master key for merchants.razorpay_key_secret_encrypted.
+  // Base64 of 32 random bytes. Generate with:
+  //   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+  MERCHANT_SECRET_ENCRYPTION_KEY: z
+    .string()
+    .min(1, 'MERCHANT_SECRET_ENCRYPTION_KEY is required (base64 of 32 bytes)'),
+
+  // Phase 4.5 — rate limiting. Configurable rather than hardcoded so a load test or a
+  // demo can raise them without a code change.
+  RATE_LIMIT_MERCHANT_MAX: z.coerce.number().int().positive().default(120),
+  RATE_LIMIT_MERCHANT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  RATE_LIMIT_AGENT_MAX: z.coerce.number().int().positive().default(60),
+  RATE_LIMIT_AGENT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
 });
 
 export type Env = Readonly<z.infer<typeof EnvSchema>>;

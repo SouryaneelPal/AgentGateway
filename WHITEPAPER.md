@@ -310,6 +310,9 @@ POST /v1/ap2/mandates
 | `GET` | `/v1/merchant/audit-log?payment_request_id=` | Drill into the full decision trail for one transaction |
 | `POST` | `/v1/merchant/agents/:id/revoke` | Immediately revoke an agent identity (sets `revoked_at`, checked on every subsequent request) |
 | `GET` | `/v1/merchant/stream` | SSE stream of live transaction/audit events for the dashboard |
+| `POST` | `/v1/merchant/agents/register` | Onboard an agent identity and register its Ed25519 public key (§3.1 step 1, §3.6) |
+
+**All `/v1/merchant/*` routes require a merchant API key** as `Authorization: Bearer <key>` (§3.6). The merchant a request acts on is derived from that key server-side; `merchantId` is never accepted from the request body or path.
 
 ---
 
@@ -387,6 +390,22 @@ This is the one failure mode the track brief explicitly asks to see handled grac
    ```
 4. The rejection is written to `audit_log` (`action = 'spend_cap_rejected'`, with the exact numbers) and surfaces immediately on the merchant's live dashboard feed.
 5. No Razorpay Order is ever created for a rejected request — the failure is caught entirely inside the gateway's own boundary, before any money-adjacent API call is made.
+
+### 3.6 Merchant Authentication, Tenant Isolation & Secrets at Rest
+
+The merchant-facing surface is multi-tenant, so it needs two distinct properties, and it is worth being precise that they are not the same property:
+
+1. **Authentication** — is this caller a merchant we know?
+2. **Tenant isolation** — which merchant's data may this caller touch?
+
+Adding only the first is a common and dangerous half-fix. If a route authenticates the caller but still reads `merchantId` from the request body, an authenticated merchant A can simply name merchant B and act on their data — an IDOR that authentication does nothing to prevent. Both properties are therefore enforced together:
+
+- **API keys.** Each merchant holds one or more keys in `merchant_api_keys`. Only a SHA-256 **hash** is stored, alongside a short non-secret prefix for identification and a `last_used_at` timestamp; the key itself is displayed once at creation and is not recoverable. A leaked database yields hashes, not working credentials. Keys are individually revocable, so one can be rotated without disturbing the others — which is why this is a separate table rather than a column on `merchants`.
+- **A scope-wide `preHandler`** authenticates every route in the merchant plugin. It is registered on the plugin, not per route, so a merchant route added later is authenticated by default rather than by remembering to opt in. `POST /v1/merchant/agents/register` is covered by it like any other route.
+- **Merchant identity is derived, never asserted.** The authenticated merchant id is attached to the request and read from there. No `/v1/merchant/*` route accepts a `merchantId` parameter; supplying one is rejected outright rather than silently ignored, so a stale client is corrected instead of quietly believing it chose the merchant.
+- **Merchant creation is not an HTTP route at all.** A merchant cannot be bootstrapped through a surface that requires that merchant's own key, so onboarding is an operator action with direct database access — which is also the honest trust model, since in production a merchant is onboarded by Razorpay rather than by an anonymous HTTP call.
+- **Secrets at rest.** `merchants.razorpay_key_secret_encrypted` is encrypted with AES-256-GCM under a master key supplied in the environment, in a versioned envelope (`v1:iv:tag:ciphertext`) so the scheme can be rotated without guessing at old rows. GCM is authenticated, so tampering is detected on decrypt rather than yielding silent garbage, and a random 96-bit IV means identical plaintexts never produce identical ciphertext. The column has carried the `_encrypted` name since §2.3; a column named as though it were protected while holding plaintext is worse than an honestly-named one, because every reader assumes the protection is already there.
+- **Rate limiting** is keyed on the caller's identity — the merchant API key on `/v1/merchant/*`, the agent identity on the payment-facing routes — rather than on IP, since agents and dashboards sit behind NAT where an IP-keyed limit would either punish co-located callers or be trivially evaded. The webhook route is exempt: dropping a settlement confirmation because Razorpay burst is far worse than the burst (§1.3).
 
 ---
 

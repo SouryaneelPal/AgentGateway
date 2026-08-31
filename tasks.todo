@@ -69,6 +69,27 @@ Derived from [ROADMAP.md](ROADMAP.md). Design rationale lives in [WHITEPAPER.md]
 
 - [x] Both protocol runs, against the identical cart and identical merchant, terminate in the same `razorpay_orders` row shape underneath
 
+## Phase 4.5 — Merchant Authentication & Tenant Isolation
+
+- [x] Add a `merchant_api_keys` table storing SHA-256 hashes rather than the keys themselves
+- [x] Enforce a valid bearer token on every `/v1/merchant/*` route via a scope-wide preHandler
+- [x] Authenticate `POST /v1/merchant/agents/register` — explicitly not treated as a special case
+- [x] Generate an API key for the test merchant and surface it for dashboard testing
+- [x] Close the cross-tenant IDOR: derive merchantId from the authenticated key, never from the request body
+- [x] Update the Phase 4 setup script to pass a merchant API key instead of a raw merchant id
+- [x] Encrypt `merchants.razorpay_key_secret_encrypted` at rest (AES-256-GCM), verified rather than assumed
+- [x] Add rate limiting per merchant API key and per agent identity, configurable via env vars
+- [x] Document the rate limits in README
+- [x] Run `npm audit --workspaces` and resolve high/critical findings
+
+**Validation:**
+
+- [x] Unauthenticated requests to every merchant route, including agents/register, are rejected 401
+- [x] A correct API key succeeds; a wrong, malformed or revoked one fails
+- [x] Cross-tenant IDOR closed: merchant A's key cannot act on merchant B even when B's id is supplied
+- [x] Rate limiting triggers under a burst and returns 429
+- [x] The Phase 4 agent's setup → onboard → purchase flow still works over both x402 and AP2
+
 ## Phase 5 — Merchant Dashboard & Interactive Protocol Tester
 
 - [ ] Build the policy console for spend caps, blocked categories, and enabled protocols per merchant, writing to `/v1/merchant/policy`
@@ -113,6 +134,42 @@ Derived from [ROADMAP.md](ROADMAP.md). Design rationale lives in [WHITEPAPER.md]
   correctly" — verified only with a **locally-signed** Razorpay-shaped delivery, not one
   sent from the Razorpay dashboard's webhook test-send. That needs real credentials plus
   a publicly reachable URL (ngrok/tunnel) for the gateway.
+
+**Phase 4.5 — closed 2026-08-31**
+
+- DOCS DID NOT EXIST WHEN THIS PHASE WAS REQUESTED. WHITEPAPER §3.6, an updated §2.4
+  route table, ROADMAP Phase 4.5 and tasks.todo Phase 4.5 were all referenced but none
+  had been written — "Phase 4.5" existed only as a name coined in commit messages. All
+  four were authored as part of this phase.
+- `merchant_api_keys` is a SEPARATE TABLE, not an `api_key` column on merchants:
+  multiple live keys allow rotation without downtime, keys are individually revocable,
+  and only a SHA-256 hash is stored (a column named `api_key` invites storing the key
+  itself). Also carries a non-secret prefix and `last_used_at`.
+- IDOR closed by DERIVATION, not by validation: no `/v1/merchant/*` route accepts
+  merchantId at all. Supplying one is rejected 400 rather than silently ignored, so a
+  stale client is corrected rather than quietly believing it chose the merchant.
+- STRUCTURAL CHANGE to the Phase 4 setup script, beyond adding an auth header: it used
+  to CREATE the merchant on its first call and thread the returned merchantId into the
+  second. Merchant creation moved out to `npm run merchant:create --workspace=gateway`,
+  because a merchant cannot be bootstrapped through a surface requiring that merchant's
+  own key. Both registrations now land on the same merchant because they present the
+  same KEY, not because the client named an id.
+- SECRET WAS NOT ENCRYPTED. `razorpay_key_secret_encrypted` had been named as though it
+  were since §2.3, but every write in the repo stored a plaintext literal and there was
+  no cipher code anywhere. Now AES-256-GCM in a versioned envelope; verified by reading
+  the raw column (`v1:…`) and confirming zero rows contain the plaintext.
+- RATE LIMITING RETURNED 500, NOT 429, on first test. The limit was enforcing correctly
+  (`x-ratelimit-remaining: 0`) but the Phase 1 global error handler did not recognise the
+  thrown rate-limit error and mapped it to `internal_error` — the wrong signal entirely,
+  since a 500 invites a retry and a 429 does not. Fixed; burst now returns 429 with
+  `retry-after`.
+- `npm audit --workspaces`: 3 high (deepmerge-ts <8.0.0 via @prisma/config, reachable
+  only through the `prisma` CLI devDependency — the runtime `@prisma/client` does not
+  pull it). `npm audit fix --force` would have downgraded Prisma to 6.12.0, breaking
+  prisma.config.ts and driver adapters. Resolved instead with a nested npm override
+  forcing deepmerge-ts ^8.0.2; @prisma/config hard-pins 7.1.5 so a flat override was
+  rejected as invalid. Final result: **found 0 vulnerabilities**, Prisma CLI verified
+  still working (validate / migrate status / generate).
 
 **Phase 4 — closed 2026-08-30**
 

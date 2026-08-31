@@ -34,11 +34,17 @@
     "globals": "^16.0.0",
     "prettier": "^3.9.6",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.68.0"
+    "typescript-eslint": "^8.68.0",
+    "deepmerge-ts": "^8.0.2"
   },
   "allowScripts": {
     "prisma@7.10.0": true,
     "@prisma/engines@7.10.0": true,
     "esbuild@0.28.2": true
+  },
+  "overrides": {
+    "@prisma/config": {
+      "deepmerge-ts": "$deepmerge-ts"
+    }
   }
 }

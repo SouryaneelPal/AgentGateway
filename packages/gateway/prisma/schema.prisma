@@ -57,8 +57,36 @@ model Merchant {
 
   agentIdentities AgentIdentity[]
   paymentRequests PaymentRequest[]
+  apiKeys         MerchantApiKey[]
 
   @@map("merchants")
+}
+
+/// Phase 4.5 — merchant API keys.
+///
+/// A separate table rather than a column on merchants, deliberately:
+///   - a merchant can hold several live keys, so one can be rotated without downtime
+///   - a single key can be revoked without disturbing the others
+///   - only a SHA-256 HASH is stored; a column named `api_key` invites storing the key
+///     itself, and a leaked database would then hand over working credentials
+///   - last_used_at makes an unused or suspicious key visible
+model MerchantApiKey {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  merchantId  String    @map("merchant_id") @db.Uuid
+  /// SHA-256 of the presented key, hex. The key itself is shown once at creation
+  /// and is not recoverable from this table.
+  keyHash     String    @unique @map("key_hash")
+  /// Non-secret prefix (e.g. agk_lIvE1234) so a human can identify a key in a list.
+  keyPrefix   String    @map("key_prefix")
+  label       String?
+  lastUsedAt  DateTime? @map("last_used_at") @db.Timestamptz(6)
+  revokedAt   DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@index([merchantId], map: "idx_merchant_api_keys_merchant")
+  @@map("merchant_api_keys")
 }
 
 /// §2.3 — agent_identities

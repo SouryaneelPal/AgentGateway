@@ -70,15 +70,28 @@ interface RegisterResponse {
 
 async function register(
   gatewayUrl: string,
+  apiKey: string,
   payload: Record<string, unknown>,
 ): Promise<RegisterResponse> {
   const response = await fetch(`${gatewayUrl}/v1/merchant/agents/register`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      // Phase 4.5: /v1/merchant/* requires a merchant API key, and the merchant is
+      // derived from it server-side.
+      authorization: `Bearer ${apiKey}`,
+    },
     body: JSON.stringify(payload),
   });
 
   const body: unknown = await response.json().catch(() => null);
+
+  if (response.status === 401) {
+    throw new Error(
+      'registration rejected: invalid or missing merchant API key. Mint one with:\n' +
+        '  npm run merchant:create --workspace=gateway -- --name "My Merchant"',
+    );
+  }
 
   if (response.status !== 201) {
     throw new Error(`registration failed: HTTP ${response.status} ${JSON.stringify(body)}`);
@@ -90,7 +103,8 @@ async function register(
 export interface SetupOptions {
   readonly gatewayUrl: string;
   readonly keystorePath: string;
-  readonly merchantName: string;
+  /** Merchant API key. The merchant identity is derived from it server-side. */
+  readonly apiKey: string;
   readonly spendingLimitPaise: number;
   readonly agentId?: string;
 }
@@ -100,24 +114,33 @@ export interface SetupOptions {
  * what makes the Phase 4 validation meaningful: two protocols, one merchant, one cart —
  * so any difference in the resulting razorpay_orders row is attributable to the protocol
  * and nothing else.
+ *
+ * STRUCTURAL CHANGE IN PHASE 4.5 — this is more than a new header. Previously this
+ * script CREATED the merchant on its first call (by passing merchantName) and then
+ * threaded the returned merchantId into the second call. Both halves are now gone:
+ *   - merchant creation moved out entirely, to the operator script
+ *     `npm run merchant:create --workspace=gateway`, because a merchant cannot be
+ *     bootstrapped through a surface that requires that merchant's own key.
+ *   - the second call no longer passes merchantId. Both registrations land on the SAME
+ *     merchant because they present the SAME API KEY, and the server derives the
+ *     merchant from it. That is what closes the cross-tenant IDOR: the client can no
+ *     longer name a merchant at all.
  */
 export async function runSetup(options: SetupOptions): Promise<AgentKeystore> {
   const keypair: Ed25519Keypair = generateKeypair();
   const agentId = options.agentId ?? `ref-agent-${Date.now().toString(36)}`;
 
-  // AP2 first — it establishes the merchant and carries the public key.
-  const ap2 = await register(options.gatewayUrl, {
-    merchantName: options.merchantName,
+  // AP2 first — it carries the public key.
+  const ap2 = await register(options.gatewayUrl, options.apiKey, {
     protocol: 'ap2',
     externalAgentId: agentId,
     publicKey: keypair.publicKeyBase64,
     spendingLimitPaise: options.spendingLimitPaise,
   });
 
-  // x402 identity for the same agent, on the same merchant. No key: x402 binds to a
-  // gateway-issued one-time reference instead of a signature (§3.2).
-  const x402 = await register(options.gatewayUrl, {
-    merchantId: ap2.merchant_id,
+  // x402 identity for the same agent. Same merchant, because same key — not because
+  // the client asserted a merchant id.
+  const x402 = await register(options.gatewayUrl, options.apiKey, {
     protocol: 'x402',
     externalAgentId: agentId,
     spendingLimitPaise: options.spendingLimitPaise,

@@ -19,10 +19,12 @@
     "razorpay:smoke": "tsx scripts/create-test-order.ts",
     "webhook:test": "tsx scripts/send-test-webhook.ts",
     "demo:protocols": "tsx scripts/demo-protocols.ts",
-    "checkout:live": "tsx scripts/create-live-checkout.ts"
+    "checkout:live": "tsx scripts/create-live-checkout.ts",
+    "merchant:create": "tsx scripts/create-merchant.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",
+    "@fastify/rate-limit": "^10.3.0",
     "@noble/ed25519": "^2.3.0",
     "@noble/hashes": "^2.4.0",
     "@prisma/adapter-pg": "^7.10.0",

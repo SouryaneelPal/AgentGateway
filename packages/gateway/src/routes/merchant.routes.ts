@@ -7,7 +7,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { NotImplementedError } from '../errors.js';
 import { prisma } from '../db/prisma-client.js';
-import { env } from '../config/env.js';
+import { authenticatedMerchantId, requireMerchantAuth } from '../auth/merchant-auth.js';
 
 /** Caps on free-text identifiers accepted by the demo onboarding route. */
 const MAX_IDENTIFIER_LENGTH = 128;
@@ -39,6 +39,15 @@ interface AuditLogQuery {
 
 export const merchantRoutes: FastifyPluginAsync = async (app) => {
   /**
+   * Phase 4.5 — every route in this plugin requires a valid merchant API key.
+   *
+   * Registered as a scope-wide hook rather than per-route on purpose: a merchant route
+   * added later is authenticated by default instead of by remembering to opt in.
+   * POST /v1/merchant/agents/register is covered by this too — it is not a special case.
+   */
+  app.addHook('preHandler', requireMerchantAuth);
+
+  /**
    * Agent onboarding (§3.1 step 1: "At onboarding, each agent registers an Ed25519
    * public key against its agent_identities row. The private key never touches the
    * gateway.").
@@ -53,13 +62,6 @@ export const merchantRoutes: FastifyPluginAsync = async (app) => {
    * merchant authentication (§5.4's production-hardening note).
    */
   app.post('/v1/merchant/agents/register', async (request, reply) => {
-    // HARD KILL-SWITCH. This route is unauthenticated (Phase 4.5 will fix that); until
-    // then it must be physically incapable of serving outside development, rather than
-    // relying on nobody deploying it by accident.
-    if (env.NODE_ENV === 'production') {
-      return reply.code(404).send({ error: 'not_found' });
-    }
-
     const body = request.body;
 
     if (typeof body !== 'object' || body === null || Array.isArray(body)) {
@@ -70,9 +72,22 @@ export const merchantRoutes: FastifyPluginAsync = async (app) => {
     const protocol = fields['protocol'];
     const externalAgentId = fields['externalAgentId'];
     const publicKey = fields['publicKey'];
-    const merchantId = fields['merchantId'];
-    const merchantName = fields['merchantName'];
     const spendingLimitPaise = fields['spendingLimitPaise'];
+
+    // IDOR CLOSED: the merchant is derived from the authenticated API key and is never
+    // read from the body. A caller holding merchant A's key cannot act on merchant B
+    // even by supplying B's id — the field is not consulted at all.
+    const resolvedMerchantId = authenticatedMerchantId(request);
+
+    if ('merchantId' in fields || 'merchantName' in fields) {
+      // Fail loudly rather than silently ignoring it, so a stale client is corrected
+      // instead of quietly believing it chose the merchant.
+      return reply.code(400).send({
+        error: 'malformed_request',
+        detail:
+          'merchantId/merchantName are no longer accepted; the merchant is determined by the API key',
+      });
+    }
 
     if (protocol !== 'x402' && protocol !== 'ap2' && protocol !== 'fallback') {
       return reply.code(400).send({ error: 'malformed_request', detail: 'invalid protocol' });
@@ -100,46 +115,9 @@ export const merchantRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(400).send({ error: 'malformed_request', detail: 'publicKey is malformed' });
     }
 
-    let resolvedMerchantId: string;
-
-    if (typeof merchantId === 'string' && merchantId.length > 0) {
-      const merchant = await prisma.merchant.findUnique({
-        where: { id: merchantId },
-        select: { id: true },
-      });
-      if (merchant === null) {
-        return reply.code(404).send({ error: 'unknown_merchant', merchantId });
-      }
-      resolvedMerchantId = merchant.id;
-    } else {
-      if (
-        merchantName !== undefined &&
-        (typeof merchantName !== 'string' || merchantName.length > MAX_IDENTIFIER_LENGTH)
-      ) {
-        return reply.code(400).send({
-          error: 'malformed_request',
-          detail: `merchantName max ${MAX_IDENTIFIER_LENGTH} chars`,
-        });
-      }
-      const name =
-        typeof merchantName === 'string' && merchantName.length > 0
-          ? merchantName
-          : 'agent-client-demo-merchant';
-      const existing = await prisma.merchant.findFirst({ where: { name }, select: { id: true } });
-      resolvedMerchantId =
-        existing?.id ??
-        (
-          await prisma.merchant.create({
-            data: {
-              name,
-              razorpayKeyId: '(demo merchant — gateway uses its own env credentials)',
-              razorpayKeySecretEncrypted: '(not stored)',
-              enabledProtocols: ['x402', 'ap2', 'fallback'],
-            },
-            select: { id: true },
-          })
-        ).id;
-    }
+    // Merchant creation is deliberately NOT reachable from an authenticated merchant
+    // route — you cannot bootstrap a merchant with a key you do not yet have. It now
+    // lives in the operator script scripts/create-merchant.ts.
 
     // Number.isInteger(-5) is true, so the previous check happily accepted a NEGATIVE
     // spending limit. Range is validated now, not just integrality.

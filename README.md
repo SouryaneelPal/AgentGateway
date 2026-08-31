@@ -228,20 +228,72 @@ npm run dev --workspace=dashboard    # http://localhost:3002
 
 ---
 
+## Authentication & rate limiting (Phase 4.5)
+
+Every `/v1/merchant/*` route requires a merchant API key as a bearer token —
+**including `POST /v1/merchant/agents/register`**, which is not a special case:
+
+```bash
+curl -H "Authorization: Bearer agk_..." http://localhost:3000/v1/merchant/policy
+```
+
+Mint a key with the operator script. Merchant creation deliberately lives here rather
+than behind an HTTP route — you cannot bootstrap a merchant using a key that merchant
+does not yet have:
+
+```bash
+npm run merchant:create --workspace=gateway -- --name "My Merchant"   # creates + mints
+npm run merchant:create --workspace=gateway -- --list                 # keys + secret status
+npm run merchant:create --workspace=gateway -- --key-for <merchantId> # rotate/add a key
+```
+
+The key is printed **once** and only its SHA-256 hash is stored, so it cannot be
+recovered — mint a new one instead. The merchant a request acts on is derived from the
+key server-side; `merchantId` is never read from the request body.
+
+### Rate limits
+
+Keyed by **who is calling**, not by IP — agents and dashboards sit behind NAT, so an
+IP-keyed limit would either punish co-located callers or be trivially evaded.
+
+| Scope                 | Keyed on                  | Env var                                                     | Default          |
+| --------------------- | ------------------------- | ----------------------------------------------------------- | ---------------- |
+| `/v1/merchant/*`      | merchant API key (hashed) | `RATE_LIMIT_MERCHANT_MAX` / `RATE_LIMIT_MERCHANT_WINDOW_MS` | 120 per 60000 ms |
+| payment-facing routes | agent identity, else IP   | `RATE_LIMIT_AGENT_MAX` / `RATE_LIMIT_AGENT_WINDOW_MS`       | 60 per 60000 ms  |
+| `/webhooks/*`         | —                         | —                                                           | **exempt**       |
+
+`/webhooks/*` is exempt on purpose: dropping a settlement confirmation because Razorpay
+burst is far worse than the burst itself (§1.3). Exceeding a limit returns `429` with
+`retry-after` and `x-ratelimit-*` headers.
+
+### Secrets at rest
+
+`merchants.razorpay_key_secret_encrypted` is encrypted with AES-256-GCM under
+`MERCHANT_SECRET_ENCRYPTION_KEY` (base64 of 32 random bytes). Generate one with:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+```
+
+Rotating that key makes every previously-stored merchant secret undecryptable.
+
+---
+
 ## Useful commands
 
-| Command                        | What it does                                                        |
-| ------------------------------ | ------------------------------------------------------------------- |
-| `npm run dev`                  | Gateway in watch mode on `PORT`                                     |
-| `npm run dev:dashboard`        | Next.js dashboard on 3002                                           |
-| `npm test`                     | Vitest across workspaces                                            |
-| `npm run typecheck`            | `tsc --noEmit` across workspaces                                    |
-| `npm run lint`                 | ESLint across the repo                                              |
-| `npm run format`               | Prettier write                                                      |
-| `npm run db:migrate`           | `prisma migrate dev`                                                |
-| `npm run db:generate`          | Regenerate the Prisma client                                        |
-| `docker compose up -d --build` | Rebuild the gateway image and restart — use after ANY source change |
-| `docker compose down -v`       | Tear down and drop the volumes                                      |
+| Command                                                     | What it does                                                        |
+| ----------------------------------------------------------- | ------------------------------------------------------------------- |
+| `npm run dev`                                               | Gateway in watch mode on `PORT`                                     |
+| `npm run dev:dashboard`                                     | Next.js dashboard on 3002                                           |
+| `npm test`                                                  | Vitest across workspaces                                            |
+| `npm run typecheck`                                         | `tsc --noEmit` across workspaces                                    |
+| `npm run lint`                                              | ESLint across the repo                                              |
+| `npm run format`                                            | Prettier write                                                      |
+| `npm run db:migrate`                                        | `prisma migrate dev`                                                |
+| `npm run db:generate`                                       | Regenerate the Prisma client                                        |
+| `npm run merchant:create --workspace=gateway -- --name "X"` | Create a merchant and mint its API key                              |
+| `docker compose up -d --build`                              | Rebuild the gateway image and restart — use after ANY source change |
+| `docker compose down -v`                                    | Tear down and drop the volumes                                      |
 
 ---
 

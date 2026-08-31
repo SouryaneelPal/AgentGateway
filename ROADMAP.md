@@ -45,6 +45,17 @@ Section references (§2.2, §3.4, §3.5, §5.3) point back into WHITEPAPER.md.
 
 **Why the model choice is an architecture decision, not a downgrade:** the reasoning layer is deliberately LLM-agnostic. The interesting engineering surface in this project is the protocol-adapter and settlement logic the agent *drives* — mandate canonicalization and Ed25519 verification (§3.1), the two-layer replay guard (§3.2), the row-locked spend cap (§3.5), and the trust boundary that lets only a signature-verified webhook declare money moved (§1.3). None of that changes with the model behind the agent's purchasing decisions; the agent is a *client* of that surface, not part of it. Pinning the prototype to a free-tier endpoint keeps iteration unmetered while that surface is built out, and the provider seam means moving to the Anthropic API — or any other OpenAI-compatible endpoint — is a one-file change rather than a redesign. A reasoning layer that can only run against one vendor would be a worse design regardless of which vendor it was.
 
+### Phase 4.5 — Merchant Authentication & Tenant Isolation
+**Stack:** Fastify `preHandler` hooks, `@fastify/rate-limit`, AES-256-GCM via `node:crypto`.
+**Deliverables:**
+- `merchant_api_keys` table storing SHA-256 hashes (never the key), with per-key revocation, a non-secret prefix for identification, and `last_used_at`.
+- A scope-wide authentication hook on every `/v1/merchant/*` route, `POST /v1/merchant/agents/register` included — not a special case.
+- Cross-tenant IDOR closed: the merchant is derived from the authenticated key server-side, and no merchant route accepts `merchantId` from the request body.
+- Merchant bootstrapping moved out of HTTP entirely, into an operator script.
+- `merchants.razorpay_key_secret_encrypted` genuinely encrypted at rest (AES-256-GCM, versioned envelope) rather than merely named as though it were.
+- Rate limiting keyed per merchant API key on `/v1/merchant/*` and per agent identity on the payment-facing routes, configurable by environment variable, with `/webhooks/*` exempt.
+**Validation checklist:** an unauthenticated request to any merchant route — `agents/register` included — is rejected 401; a valid key succeeds and a wrong or revoked one fails; a valid key for merchant A cannot act on merchant B even when B's id is supplied; a burst returns 429; the Phase 4 reference agent's full setup → onboard → purchase flow still completes over both protocols.
+
 ### Phase 5 — Merchant Dashboard & Interactive Protocol Tester
 **Stack:** Next.js 14+ (App Router), TypeScript, Tailwind CSS, SSE for live updates.
 **Deliverables:**
