@@ -14,6 +14,13 @@
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../db/prisma-client.js';
 import { getRazorpayClient, isRecord, readNumber, readString } from './adapter-support.js';
+import {
+  MAX_AMOUNT_PAISE,
+  MAX_NONCE_LENGTH,
+  MAX_URL_LENGTH,
+  isUuid,
+  isValidAmountPaise,
+} from '../validation.js';
 import type {
   IncomingRequest,
   NormalizedPaymentRequest,
@@ -53,12 +60,20 @@ export class FallbackAdapter implements RoutableProtocolAdapter {
     const agentId = readString(body, 'agentId');
     const merchantId = readString(body, 'merchantId');
 
-    if (amountPaise === null || !Number.isInteger(amountPaise) || amountPaise <= 0) {
-      return this.reject('malformed_request', { reason: 'amountPaise must be a positive integer' });
+    if (!isValidAmountPaise(amountPaise)) {
+      return this.reject('malformed_request', {
+        reason: `amountPaise must be a positive integer of at most ${MAX_AMOUNT_PAISE}`,
+      });
     }
 
     if (agentId === null || merchantId === null) {
       return this.reject('malformed_request', { reason: 'agentId and merchantId are required' });
+    }
+
+    // merchantId indexes a uuid column; a malformed value errors inside Postgres instead
+    // of returning no rows, which produced a 500 for what is plainly a bad request.
+    if (!isUuid(merchantId)) {
+      return this.reject('malformed_request', { reason: 'merchantId must be a UUID' });
     }
 
     // An unrecognised agent is registered on the fly at 'untrusted', because refusing
@@ -97,7 +112,8 @@ export class FallbackAdapter implements RoutableProtocolAdapter {
         amountPaise,
         // No protocol nonce exists here, so the gateway mints one; it still provides
         // one-time semantics through the same §3.2 guard as every other protocol.
-        nonce: readString(body, 'nonce') ?? `fb_${randomUUID().replace(/-/g, '')}`,
+        nonce:
+          readString(body, 'nonce', MAX_NONCE_LENGTH) ?? `fb_${randomUUID().replace(/-/g, '')}`,
         expiresAt: new Date(Date.now() + 60 * 60 * 1000),
         canonicalPayload: JSON.stringify(body),
         signature: 'none:human-approval',
@@ -168,7 +184,9 @@ export class FallbackAdapter implements RoutableProtocolAdapter {
       });
     });
 
-    const shortUrl = isRecord(link) ? readString(link, 'short_url') : null;
+    // Razorpay's own response, not caller input, but it is still read through the
+    // bounded helper — a URL is legitimately longer than an identifier.
+    const shortUrl = isRecord(link) ? readString(link, 'short_url', MAX_URL_LENGTH) : null;
 
     return {
       paymentRequestId,

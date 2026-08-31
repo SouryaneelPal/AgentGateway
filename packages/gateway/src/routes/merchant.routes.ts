@@ -7,7 +7,10 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type { Prisma } from '../generated/prisma/index.js';
 import { prisma } from '../db/prisma-client.js';
-import { env } from '../config/env.js';
+import { isAllowedOrigin } from '../config/cors.js';
+// Bounds come from the shared module so these routes and the protocol adapters cannot
+// drift apart on what counts as an acceptable identifier.
+import { MAX_IDENTIFIER_LENGTH, MAX_SPENDING_LIMIT_PAISE } from '../validation.js';
 import { authenticatedMerchantId, requireMerchantAuth } from '../auth/merchant-auth.js';
 import { parseMerchantPolicy } from '../policy/policy-engine.js';
 
@@ -81,11 +84,6 @@ export function explainAuditAction(action: string, detail: unknown): string {
       return `Recorded: ${action.replace(/_/g, ' ')}.`;
   }
 }
-
-/** Caps on free-text identifiers accepted by the demo onboarding route. */
-const MAX_IDENTIFIER_LENGTH = 128;
-/** ₹10,00,000. Generous for test mode, finite by design. */
-const MAX_SPENDING_LIMIT_PAISE = 100_000_000;
 
 /** An Ed25519 public key is exactly 32 bytes, base64-encoded. */
 function isEd25519PublicKey(value: unknown): boolean {
@@ -571,11 +569,15 @@ export const merchantRoutes: FastifyPluginAsync = async (app) => {
     // CORS has to be set HERE, by hand. This handler writes straight to reply.raw, so
     // @fastify/cors never sees the response and its headers are never applied — the
     // stream works fine from curl and is silently blocked in the browser, which is a
-    // confusing way to fail. The origin is echoed only in development, matching the
-    // cors plugin's own policy in server.ts.
+    // confusing way to fail.
+    //
+    // It MUST apply the same allowlist as the cors plugin in server.ts. It previously
+    // echoed any origin back in development, which was the same reflect-anything
+    // behaviour Phase 7 removed from the plugin — leaving it here would have meant the
+    // documented policy and the actual policy disagreeing on one endpoint.
     const origin = request.headers.origin;
     const corsHeaders =
-      env.NODE_ENV === 'development' && typeof origin === 'string'
+      typeof origin === 'string' && isAllowedOrigin(origin)
         ? { 'access-control-allow-origin': origin, 'access-control-allow-credentials': 'true' }
         : {};
 

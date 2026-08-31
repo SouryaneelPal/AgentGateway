@@ -13,6 +13,13 @@ import { prisma } from '../db/prisma-client.js';
 import { runPaymentPipeline } from '../pipeline/payment-pipeline.js';
 import { routeRequest } from '../adapters/protocol-router.js';
 import { x402Adapter, X402_PAYMENT_REQUIRED_HEADER } from '../adapters/x402.adapter.js';
+import {
+  MAX_IDENTIFIER_LENGTH,
+  isSafeString,
+  isUuid,
+  isValidAmountPaise,
+  MAX_AMOUNT_PAISE,
+} from '../validation.js';
 import { sendOutcome, toIncomingRequest } from './route-support.js';
 
 interface CheckoutParams {
@@ -45,6 +52,24 @@ export const x402Routes: FastifyPluginAsync = async (app) => {
         });
       }
 
+      // Query and route parameters bypass the body-wide control-character hook in
+      // server.ts, which only inspects request.body — so they are checked here.
+      if (!isSafeString(agentId) || !isSafeString(request.params.cartId)) {
+        return reply.code(400).send({
+          error: 'malformed_request',
+          detail: `agentId and cartId must be non-empty, at most ${MAX_IDENTIFIER_LENGTH} characters, and free of control characters`,
+        });
+      }
+
+      // merchantId is a uuid column. Anything else fails inside Postgres rather than
+      // returning no rows, which turned a bad query parameter into an HTTP 500.
+      if (!isUuid(merchantId)) {
+        return reply.code(400).send({
+          error: 'malformed_request',
+          detail: 'merchantId must be a UUID',
+        });
+      }
+
       const agent = await prisma.agentIdentity.findUnique({
         where: {
           merchantId_protocol_externalAgentId: {
@@ -66,11 +91,22 @@ export const x402Routes: FastifyPluginAsync = async (app) => {
         return reply.code(403).send({ error: 'agent_revoked', agent_identity_id: agent.id });
       }
 
-      const parsedAmount = Number(request.query.amountPaise);
-      const amountPaise =
-        Number.isInteger(parsedAmount) && parsedAmount > 0
-          ? parsedAmount
-          : DEFAULT_CART_AMOUNT_PAISE;
+      // An ABSENT amount falls back to the demo cart price. An amount that is PRESENT
+      // but nonsensical (negative, non-numeric, above the ceiling) is refused rather
+      // than silently replaced with the default — quietly charging a different amount
+      // than the caller asked for is the worst available response to a bad amount.
+      const rawAmount = request.query.amountPaise;
+      let amountPaise = DEFAULT_CART_AMOUNT_PAISE;
+      if (rawAmount !== undefined) {
+        const parsedAmount = Number(rawAmount);
+        if (!isValidAmountPaise(parsedAmount)) {
+          return reply.code(400).send({
+            error: 'malformed_request',
+            detail: `amountPaise must be a positive integer of at most ${MAX_AMOUNT_PAISE}`,
+          });
+        }
+        amountPaise = parsedAmount;
+      }
 
       const envelope = await x402Adapter.issueChallenge({
         cartId: request.params.cartId,

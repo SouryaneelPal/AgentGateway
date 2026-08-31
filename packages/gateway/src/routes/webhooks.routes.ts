@@ -16,7 +16,9 @@
  */
 
 import type { FastifyPluginAsync } from 'fastify';
-import { type Prisma } from '../generated/prisma/index.js';
+// Value import, not type-only: PrismaClientKnownRequestError is needed at runtime to
+// recognise a unique-constraint violation in storeInvalidDelivery.
+import { Prisma } from '../generated/prisma/index.js';
 import { prisma } from '../db/prisma-client.js';
 import { env } from '../config/env.js';
 import { verifyWebhookSignature } from '../razorpay/webhook-signature.js';
@@ -137,6 +139,26 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
     const { eventType, razorpayOrderId, razorpayPaymentId, notedPaymentRequestId } =
       extractEvent(parsed);
 
+    /**
+     * Signature check comes BEFORE the redelivery guard, and the order is load-bearing.
+     *
+     * The redelivery guard consumes an event id — once an id is on record, any later
+     * delivery carrying it is answered 200 and dropped. Consulting that guard before
+     * establishing that the caller is Razorpay let an unauthenticated caller reserve an
+     * id and mute the genuine settlement webhook for it. See storeInvalidDelivery.
+     *
+     * Every event is still persisted regardless of validity — invalid ones logged and
+     * rejected, never silently dropped (§2.4 / §3.4) — but a delivery only earns the
+     * right to occupy the real event id by proving it came from Razorpay.
+     */
+    if (!signatureValid) {
+      await storeInvalidDelivery(razorpayEventId, eventType, rawBody, parsed);
+      request.log.warn({ razorpayEventId, eventType }, 'webhook signature verification FAILED');
+      return reply
+        .code(400)
+        .send({ error: 'invalid_signature', razorpay_event_id: razorpayEventId });
+    }
+
     // Redelivery guard (§3.4). Razorpay retries on failure with backoff;
     // webhook_events.razorpay_event_id is UNIQUE at the DB level, and this read is the
     // fast path in front of that constraint.
@@ -152,16 +174,6 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
         razorpay_event_id: razorpayEventId,
         processed_at: existing.processedAt?.toISOString() ?? null,
       });
-    }
-
-    // Every event is persisted regardless of validity — invalid ones logged and
-    // rejected, never silently dropped (§2.4 / §3.4).
-    if (!signatureValid) {
-      await storeInvalidDelivery(razorpayEventId, eventType, rawBody, parsed);
-      request.log.warn({ razorpayEventId, eventType }, 'webhook signature verification FAILED');
-      return reply
-        .code(400)
-        .send({ error: 'invalid_signature', razorpay_event_id: razorpayEventId });
     }
 
     const result = await prisma.$transaction(async (tx) => {
@@ -334,19 +346,48 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
  * Stores a signature-invalid delivery. Kept outside the success transaction on purpose:
  * the record must survive even though the request is being rejected.
  */
+/**
+ * Records a delivery that failed signature verification.
+ *
+ * The row is stored under a NAMESPACED id, never under the event id the caller claimed.
+ *
+ * Storing it under the claimed id was a real, verified vulnerability (found in Phase 7).
+ * webhook_events.razorpay_event_id is UNIQUE and the redelivery guard consults it, so an
+ * unauthenticated caller could POST a garbage signature carrying a chosen
+ * X-Razorpay-Event-Id, claim that id, and cause the genuine Razorpay delivery of the same
+ * event to be answered `200 duplicate_ignored` — silently suppressing the settlement, and
+ * with a 200 that stops Razorpay retrying. That inverts §1.3: the webhook is the only
+ * thing permitted to confirm settlement, so anything that can mute it can strand a paid
+ * order at awaiting_settlement forever.
+ *
+ * The namespace keeps the audit obligation (§2.4/§3.4: invalid deliveries are logged and
+ * rejected, never silently dropped) while leaving the genuine id unclaimed. The body hash
+ * makes a repeated identical forgery idempotent rather than unbounded.
+ */
 async function storeInvalidDelivery(
-  razorpayEventId: string,
+  claimedEventId: string,
   eventType: string,
   rawBody: Buffer,
   parsed: unknown,
 ): Promise<void> {
-  await prisma.webhookEvent.create({
-    data: {
-      razorpayEventId,
-      eventType,
-      signatureValid: false,
-      rawPayload: toStorablePayload(rawBody, parsed),
-      // processed_at stays NULL: received and recorded, deliberately not acted on.
-    },
-  });
+  const bodyHash = createHash('sha256').update(rawBody).digest('hex').slice(0, 32);
+  const quarantinedId = `invalid:${claimedEventId}:${bodyHash}`;
+
+  try {
+    await prisma.webhookEvent.create({
+      data: {
+        razorpayEventId: quarantinedId,
+        eventType,
+        signatureValid: false,
+        rawPayload: toStorablePayload(rawBody, parsed),
+        // processed_at stays NULL: received and recorded, deliberately not acted on.
+      },
+    });
+  } catch (error) {
+    // A byte-identical forgery replayed against the same id is already on record. The
+    // unique constraint doing its job is not a failure worth propagating.
+    if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+      throw error;
+    }
+  }
 }

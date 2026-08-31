@@ -332,6 +332,33 @@ Derived from [ROADMAP.md](ROADMAP.md). Design rationale lives in [WHITEPAPER.md]
   capture explicitly. The wrapper exists so a future flow that needs manual capture has
   a typed entry point; its request shape is pinned by test/razorpay-client.test.ts.
 
+**Phase 7 — decisions**
+
+- The webhook redelivery guard now runs AFTER signature verification, and unverified
+  deliveries are stored under `invalid:<claimed-id>:<body-hash>` instead of the event id
+  the caller supplied. This closes a settlement-suppression hole: because the id column is
+  UNIQUE and the guard consults it, an unauthenticated caller could reserve an event id
+  with a garbage signature and have the genuine Razorpay delivery answered
+  `200 duplicate_ignored` — permanently stranding a paid order at awaiting_settlement.
+  Confirmed exploitable live before fixing. This was outside the four items Phase 7 was
+  scoped to; it was found by the probing those items required.
+- 5xx responses never echo `error.message`, and the suppression is NOT gated on
+  NODE_ENV=production. A leak that only appears in production is one nobody sees while
+  developing — this one survived five phases because dev responses merely looked helpful.
+- Control characters are REJECTED, never stripped. Stripping would alter bytes that are
+  about to be canonicalized and signature-checked, and a mandate verifying against
+  something other than what the agent sent is worse than a refused one.
+- The control-character scan is body-wide, not per-field, because the fallback adapter
+  persists the entire request body — per-field checks only protect the fields we read.
+- `DASHBOARD_ORIGIN` defaults to port 3002 (the dashboard), NOT 3000 (the gateway). The
+  first draft used 3000 and would have refused every request the console makes.
+- The gateway-only load test stubs the Razorpay SDK INSTANCE, not our RazorpayClient
+  wrapper, so our own request-building code stays in the measurement. Its numbers are not
+  end-to-end settlement latency and `docs/load-profile-gateway-only.md` says so at the top.
+- NOTE for a future pass: §5.4 still lists "per-agent rate limiting" as deferred. It was
+  built in Phase 4.5 and its keying fixed in Phase 6, so that line is now stale. Left
+  unedited here because Phase 7 was instructed not to touch §5.4.
+
 **Phase 3 — decisions**
 
 - `PolicyEngine.evaluate()` is called by a shared pipeline (`pipeline/payment-pipeline.ts`)

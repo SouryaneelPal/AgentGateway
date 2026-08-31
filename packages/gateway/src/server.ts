@@ -10,10 +10,12 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
+import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import { readBearerToken, hashApiKey } from './auth/merchant-auth.js';
 
 import { env } from './config/env.js';
+import { isAllowedOrigin } from './config/cors.js';
 import { NotImplementedError, PolicyRejectionError } from './errors.js';
 import { healthRoutes } from './health/health.routes.js';
 import { x402Routes } from './routes/x402.routes.js';
@@ -23,6 +25,7 @@ import { webhookRoutes } from './routes/webhooks.routes.js';
 import { merchantRoutes } from './routes/merchant.routes.js';
 import { disconnectDatabase } from './db/prisma-client.js';
 import { disconnectRedis } from './redis/redis-client.js';
+import { findControlCharacterPath } from './validation.js';
 
 /**
  * Best-effort attribution of a payment-facing request to an agent identity, for rate
@@ -147,10 +150,80 @@ export async function buildServer(): Promise<FastifyInstance> {
     }),
   });
 
+  /**
+   * Security headers (Phase 7).
+   *
+   * The gateway serves JSON, never HTML, so the headers that matter here are the ones
+   * that stop a response from being *reinterpreted* as something renderable:
+   * nosniff defeats content-type guessing, frame-ancestors 'none' defeats framing, and a
+   * CSP of default-src 'none' means that if a JSON body ever were rendered as a document,
+   * it could load nothing.
+   *
+   * HSTS is deliberately left to helmet's default (enabled, but only ever acted on by a
+   * browser over HTTPS). Locally the gateway is plain HTTP and the header is ignored.
+   */
+  await app.register(helmet, {
+    contentSecurityPolicy: {
+      directives: {
+        'default-src': ["'none'"],
+        'frame-ancestors': ["'none'"],
+        'base-uri': ["'none'"],
+        'form-action': ["'none'"],
+      },
+    },
+    // The console fetches from a different origin; a same-origin-only referrer policy is
+    // the strictest setting that still lets it work.
+    referrerPolicy: { policy: 'no-referrer' },
+    crossOriginResourcePolicy: { policy: 'same-site' },
+  });
+
+  /**
+   * CORS (Phase 7).
+   *
+   * Previously `origin: true` in development, which reflects whatever Origin the caller
+   * sends. Combined with `credentials: true` that is the permissive combination: any web
+   * page the merchant happened to visit could issue credentialed requests to a gateway
+   * running on their machine and read the replies. It is now an explicit allowlist in
+   * every environment, sourced from DASHBOARD_ORIGIN.
+   *
+   * A request with no Origin header is allowed through. That is not a hole — it is how
+   * every non-browser client behaves (curl, the agent client, Razorpay's webhook
+   * delivery), and CORS is a browser mechanism that has nothing to say about them. The
+   * gateway's actual authorization for those callers is the API key and the webhook HMAC.
+   */
   await app.register(cors, {
-    // The dashboard (Phase 5) is a separate origin in development.
-    origin: env.NODE_ENV === 'development' ? true : false,
+    origin: (origin, callback) => {
+      if (origin === undefined || isAllowedOrigin(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(null, false);
+    },
     credentials: true,
+  });
+
+  /**
+   * Body-wide control-character rejection (Phase 7).
+   *
+   * Postgres text and jsonb columns cannot store U+0000; it raises error 22021. Before
+   * this hook, a null byte anywhere in a request body surfaced as an HTTP 500 carrying a
+   * raw Prisma error — found by probing POST /v1/ap2/mandates during this pass.
+   *
+   * This runs body-wide rather than field-by-field because the fallback adapter persists
+   * the entire body (`JSON.stringify(body)` and `raw: { ...body }`), so a null byte in a
+   * field no adapter reads still reaches the database. Per-field bounds still exist in
+   * the adapters; this is the backstop that makes them sufficient.
+   */
+  app.addHook('preValidation', async (request, reply) => {
+    if (request.body === undefined || request.body === null) return;
+    const offendingPath = findControlCharacterPath(request.body);
+    if (offendingPath !== null) {
+      await reply.code(400).send({
+        error: 'malformed_request',
+        message: 'Request contains control characters, which cannot be stored.',
+        field: offendingPath,
+      });
+    }
   });
 
   // Anything scaffolded but not yet built answers 501, not 500 — an unimplemented
@@ -181,9 +254,32 @@ export async function buildServer(): Promise<FastifyInstance> {
 
     request.log.error({ err: error }, 'unhandled error');
     const statusCode = typeof error.statusCode === 'number' ? error.statusCode : 500;
+
+    /**
+     * A 5xx never echoes the underlying message (Phase 7).
+     *
+     * `message: error.message` used to be returned verbatim. For a Prisma failure that
+     * message contains the absolute source path of the query, the surrounding lines of
+     * our own source, and the raw Postgres error — all of which were being handed to an
+     * unauthenticated caller. A null byte in an agent id was enough to trigger it.
+     *
+     * Suppression is unconditional rather than gated on NODE_ENV=production. A leak that
+     * only appears in production is a leak nobody sees while building, and the detail is
+     * not lost — the full error is logged above, and the request id below correlates the
+     * caller's report to that log line.
+     */
+    if (statusCode >= 500) {
+      return reply.code(statusCode).send({
+        error: 'internal_error',
+        message: 'The gateway failed to process this request. The failure has been logged.',
+        requestId: request.id,
+      });
+    }
+
     return reply.code(statusCode).send({
-      error: statusCode === 500 ? 'internal_error' : (error.code ?? 'request_error'),
+      error: error.code ?? 'request_error',
       message: error.message,
+      requestId: request.id,
     });
   });
 

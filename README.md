@@ -279,6 +279,57 @@ Rotating that key makes every previously-stored merchant secret undecryptable.
 
 ---
 
+## CORS and security headers (Phase 7)
+
+### CORS policy
+
+The gateway allows cross-origin browser requests **only from the origins listed in
+`DASHBOARD_ORIGIN`** (comma-separated, defaults to `http://localhost:3002`, the
+console's dev port). Every other
+origin is refused, in every environment.
+
+```bash
+# .env — a deployed console on a different host
+DASHBOARD_ORIGIN=https://console.example.com
+```
+
+Two details worth stating plainly, because both look like holes and neither is:
+
+- **A request with no `Origin` header is allowed.** That is every non-browser client:
+  curl, the reference agent, and Razorpay's webhook delivery. CORS is a browser
+  mechanism and has nothing to say about them — their authorization is the merchant API
+  key and the webhook HMAC, which are enforced regardless of origin. Rejecting
+  origin-less requests would break every server-to-server caller and secure nothing.
+- **`credentials: true` is set**, which is why the allowlist has to be explicit. The
+  previous setting was `origin: true` in development, which reflects back whatever origin
+  the caller sends; combined with credentials, any page a merchant happened to visit
+  could have issued credentialed requests to a gateway on their machine and read the
+  replies.
+
+The SSE endpoint `GET /v1/merchant/stream` writes to the raw socket and therefore bypasses
+`@fastify/cors`. It sets the same allowlisted origin header itself — if you change the CORS
+policy, change it there too, or the console's live feed silently stops working in the
+browser while continuing to work under curl.
+
+### Security headers
+
+`@fastify/helmet` is registered globally. The gateway serves JSON and never HTML, so the
+headers that matter are the ones preventing a response from being reinterpreted as
+something renderable:
+
+| Header                         | Value                                           |
+| ------------------------------ | ----------------------------------------------- |
+| `Content-Security-Policy`      | `default-src 'none'; frame-ancestors 'none'; …` |
+| `X-Content-Type-Options`       | `nosniff`                                       |
+| `Referrer-Policy`              | `no-referrer`                                   |
+| `Cross-Origin-Resource-Policy` | `same-site`                                     |
+| `Strict-Transport-Security`    | helmet default (only acted on over HTTPS)       |
+
+See [HARDENING.md](HARDENING.md) for what was tested, what was found, and what is
+deliberately out of scope.
+
+---
+
 ## Useful commands
 
 | Command                                                     | What it does                                                        |

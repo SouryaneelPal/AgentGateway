@@ -36,8 +36,22 @@ const EnvSchema = z.object({
     .string()
     .min(1, 'MERCHANT_SECRET_ENCRYPTION_KEY is required (base64 of 32 bytes)'),
 
+  /**
+   * Comma-separated list of browser origins allowed to call the gateway (Phase 7).
+   *
+   * Only the merchant console needs cross-origin access; agents are server-side callers
+   * and send no Origin header, so a strict list costs them nothing. Deployments override
+   * it rather than widening it.
+   *
+   * The default is port 3002 — the DASHBOARD's port (`next dev --port 3002`), not 3000,
+   * which is the gateway's own. Defaulting to 3000 would have refused every request the
+   * console actually makes while looking superficially correct.
+   */
+  DASHBOARD_ORIGIN: z.string().default('http://localhost:3002'),
+
   // Phase 4.5 — rate limiting. Configurable rather than hardcoded so a load test or a
   // demo can raise them without a code change.
+
   RATE_LIMIT_MERCHANT_MAX: z.coerce.number().int().positive().default(120),
   RATE_LIMIT_MERCHANT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
   RATE_LIMIT_AGENT_MAX: z.coerce.number().int().positive().default(60),

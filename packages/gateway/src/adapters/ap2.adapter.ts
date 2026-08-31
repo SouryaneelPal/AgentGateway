@@ -25,6 +25,7 @@ import type {
   ValidationResult,
 } from './protocol-adapter.interface.js';
 import { createRazorpayOrderFor, isRecord, readNumber, readString } from './adapter-support.js';
+import { MAX_NONCE_LENGTH, MAX_SIGNATURE_LENGTH, isValidAmountPaise } from '../validation.js';
 
 /** The IntentMandate body shape from §2.4's worked example. */
 interface IntentMandateBody {
@@ -41,13 +42,16 @@ interface IntentMandateBody {
 function parseMandate(body: unknown): IntentMandateBody | null {
   if (!isRecord(body)) return null;
 
+  // Per-field bounds. Everything here is attacker-controlled: these values are
+  // canonicalized, hashed, used as database lookup keys and written to audit rows, so an
+  // unbounded string is carried a long way before anything objects to it.
   const mandateType = readString(body, 'mandateType');
   const agentId = readString(body, 'agentId');
   const merchantId = readString(body, 'merchantId');
   const currency = readString(body, 'currency') ?? 'INR';
   const expiresAt = readString(body, 'expiresAt');
-  const nonce = readString(body, 'nonce');
-  const signature = readString(body, 'signature');
+  const nonce = readString(body, 'nonce', MAX_NONCE_LENGTH);
+  const signature = readString(body, 'signature', MAX_SIGNATURE_LENGTH);
   const maxAmountPaise = readNumber(body, 'maxAmountPaise');
 
   if (
@@ -89,7 +93,7 @@ export class Ap2Adapter implements RoutableProtocolAdapter {
     if (!isRecord(request.body)) return false;
     return (
       readString(request.body, 'mandateType') !== null &&
-      readString(request.body, 'signature') !== null
+      readString(request.body, 'signature', MAX_SIGNATURE_LENGTH) !== null
     );
   }
 
@@ -120,7 +124,11 @@ export class Ap2Adapter implements RoutableProtocolAdapter {
       return this.reject('malformed_request', { currency: mandate.currency });
     }
 
-    if (!Number.isInteger(mandate.maxAmountPaise) || mandate.maxAmountPaise <= 0) {
+    // Upper bound as well as lower. Without a ceiling, a mandate for Number.MAX_SAFE_INTEGER
+    // paise passes the "positive integer" check and is only refused later by the spend cap
+    // or by Razorpay — a refusal that costs a database transaction and an outbound API call
+    // to reach a conclusion available for free here.
+    if (!isValidAmountPaise(mandate.maxAmountPaise)) {
       return this.reject('malformed_request', { maxAmountPaise: mandate.maxAmountPaise });
     }
 

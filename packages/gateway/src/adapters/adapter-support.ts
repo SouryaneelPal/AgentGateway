@@ -10,15 +10,31 @@ import type { Prisma } from '../generated/prisma/index.js';
 import { prisma } from '../db/prisma-client.js';
 import { razorpayClient, type RazorpayClient } from '../razorpay/razorpay-client.js';
 import type { NormalizedPaymentRequest, SettlementResult } from './protocol-adapter.interface.js';
+import { MAX_IDENTIFIER_LENGTH, isSafeString } from '../validation.js';
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-export function readString(source: unknown, key: string): string | null {
+/**
+ * Reads a bounded, control-character-free string off untrusted JSON.
+ *
+ * The bounds live here rather than in each adapter because this is the single function
+ * every adapter already routes its untrusted reads through. Anything that fails the
+ * bounds reads as absent, which lands the caller in its existing "missing field" branch
+ * and yields a 400 — the same outcome as omitting it, which is the honest answer for a
+ * value we are refusing to look at.
+ *
+ * See ../validation.ts for why control characters are rejected rather than stripped.
+ */
+export function readString(
+  source: unknown,
+  key: string,
+  maxLength: number = MAX_IDENTIFIER_LENGTH,
+): string | null {
   if (!isRecord(source)) return null;
   const value = source[key];
-  return typeof value === 'string' && value.length > 0 ? value : null;
+  return isSafeString(value, maxLength) ? value : null;
 }
 
 export function readNumber(source: unknown, key: string): number | null {

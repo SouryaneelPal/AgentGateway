@@ -31,7 +31,16 @@ afterAll(async () => {
 
 afterEach(async () => {
   if (eventIds.length > 0) {
-    await prisma.webhookEvent.deleteMany({ where: { razorpayEventId: { in: eventIds } } });
+    await prisma.webhookEvent.deleteMany({
+      where: {
+        OR: [
+          { razorpayEventId: { in: eventIds } },
+          // Deliveries that failed verification are stored under `invalid:<id>:<hash>`,
+          // so an exact-id delete would leave them behind as residue.
+          ...eventIds.map((id) => ({ razorpayEventId: { startsWith: `invalid:${id}:` } })),
+        ],
+      },
+    });
     eventIds.length = 0;
   }
   while (created.length > 0) {
@@ -185,12 +194,22 @@ describe('POST /webhooks/razorpay — tampered signature (§3.4)', () => {
     expect(response.statusCode).toBe(400);
     expect(response.json()).toMatchObject({ error: 'invalid_signature' });
 
-    // Logged and rejected, never silently dropped.
-    const event = await prisma.webhookEvent.findUniqueOrThrow({
-      where: { razorpayEventId: eventId },
+    // Logged and rejected, never silently dropped (§2.4 / §3.4) — but under the
+    // QUARANTINED id, not the id the caller claimed. Phase 7 changed this: storing an
+    // unverified delivery under the claimed event id let an unauthenticated caller
+    // reserve that id and have the genuine webhook answered `duplicate_ignored`.
+    // See test/webhook-event-id-claim.test.ts.
+    const quarantined = await prisma.webhookEvent.findMany({
+      where: { razorpayEventId: { startsWith: `invalid:${eventId}:` } },
     });
-    expect(event.signatureValid).toBe(false);
-    expect(event.processedAt).toBeNull();
+    expect(quarantined).toHaveLength(1);
+    expect(quarantined[0]?.signatureValid).toBe(false);
+    expect(quarantined[0]?.processedAt).toBeNull();
+
+    // The genuine id is left unclaimed, so a real delivery can still use it.
+    await expect(
+      prisma.webhookEvent.findUnique({ where: { razorpayEventId: eventId } }),
+    ).resolves.toBeNull();
 
     // No state change whatsoever.
     const order = await prisma.razorpayOrder.findUniqueOrThrow({ where: { razorpayOrderId } });
@@ -220,10 +239,22 @@ describe('POST /webhooks/razorpay — tampered signature (§3.4)', () => {
     });
 
     expect(response.statusCode).toBe(400);
-    expect(
-      (await prisma.webhookEvent.findUniqueOrThrow({ where: { razorpayEventId: eventId } }))
-        .signatureValid,
-    ).toBe(false);
+    // Logged and rejected, never silently dropped (§2.4 / §3.4) — but under the
+    // QUARANTINED id, not the id the caller claimed. Phase 7 changed this: storing an
+    // unverified delivery under the claimed event id let an unauthenticated caller
+    // reserve that id and have the genuine webhook answered `duplicate_ignored`.
+    // See test/webhook-event-id-claim.test.ts.
+    const quarantined = await prisma.webhookEvent.findMany({
+      where: { razorpayEventId: { startsWith: `invalid:${eventId}:` } },
+    });
+    expect(quarantined).toHaveLength(1);
+    expect(quarantined[0]?.signatureValid).toBe(false);
+    expect(quarantined[0]?.processedAt).toBeNull();
+
+    // The genuine id is left unclaimed, so a real delivery can still use it.
+    await expect(
+      prisma.webhookEvent.findUnique({ where: { razorpayEventId: eventId } }),
+    ).resolves.toBeNull();
   });
 
   it('rejects a request with no signature header at all', async () => {
