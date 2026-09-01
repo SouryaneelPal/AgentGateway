@@ -64,6 +64,14 @@ services:
       RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:?set RAZORPAY_KEY_ID in .env}
       RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:?set RAZORPAY_KEY_SECRET in .env}
       RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:?set RAZORPAY_WEBHOOK_SECRET in .env}
+      # Required, and guarded like the Razorpay keys rather than passed optionally.
+      # Omitting it used to crash-loop the container on boot with "expected string,
+      # received undefined" — while `docker compose up -d` still exited 0, so the
+      # failure was invisible until you ran `docker compose ps`. A `:?` guard stops
+      # Compose before a container is created and names the missing variable.
+      # Quoted: the guard message contains ": ", which unquoted YAML reads as a
+      # mapping separator and refuses to parse.
+      MERCHANT_SECRET_ENCRYPTION_KEY: '${MERCHANT_SECRET_ENCRYPTION_KEY:?set MERCHANT_SECRET_ENCRYPTION_KEY in .env — generate one with openssl rand -base64 32}'
     ports:
       - '3001:3001'
     healthcheck:

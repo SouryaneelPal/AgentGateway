@@ -73,7 +73,8 @@ async function register(
   apiKey: string,
   payload: Record<string, unknown>,
 ): Promise<RegisterResponse> {
-  const response = await fetch(`${gatewayUrl}/v1/merchant/agents/register`, {
+  const url = `${gatewayUrl}/v1/merchant/agents/register`;
+  const response = await fetch(url, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -94,7 +95,16 @@ async function register(
   }
 
   if (response.status !== 201) {
-    throw new Error(`registration failed: HTTP ${response.status} ${JSON.stringify(body)}`);
+    /*
+     * Name the URL. Without it this read `registration failed: HTTP 404 null`, which is
+     * actively misleading: the agent defaults to http://localhost:3000, and if something
+     * unrelated is listening there you get a 404 from a stranger rather than a connection
+     * error, with nothing on screen pointing at the wrong port as the cause.
+     */
+    throw new Error(
+      `registration failed: HTTP ${response.status} from ${url} — ${JSON.stringify(body)}\n` +
+        '  If that is not your gateway, pass --gateway-url <url> (default http://localhost:3000).',
+    );
   }
 
   return body as RegisterResponse;

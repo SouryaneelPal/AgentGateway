@@ -114,6 +114,8 @@ updates in real time.
 - Node.js ≥ 20.11
 - Docker Desktop (or any Docker engine with Compose v2)
 - Razorpay **test-mode** API keys — dashboard → Test Mode → Settings → API Keys
+- `jq` is used in a couple of the verification snippets below. Optional — drop the
+  `| jq` and you get the same JSON unformatted.
 
 ### 1. Configure environment
 
@@ -121,8 +123,40 @@ updates in real time.
 cp .env.example .env
 ```
 
-Fill in `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` and `RAZORPAY_WEBHOOK_SECRET`.
+**Four values must be filled in before anything will start.** Three come from Razorpay;
+the fourth you generate locally:
+
+| Variable                         | Where it comes from                                               |
+| -------------------------------- | ----------------------------------------------------------------- |
+| `RAZORPAY_KEY_ID`                | Razorpay dashboard → Test Mode → Settings → API Keys              |
+| `RAZORPAY_KEY_SECRET`            | same screen, shown once when you generate the key                 |
+| `RAZORPAY_WEBHOOK_SECRET`        | Settings → Webhooks → the secret you set when registering the URL |
+| `MERCHANT_SECRET_ENCRYPTION_KEY` | generate it — see below                                           |
+
+`MERCHANT_SECRET_ENCRYPTION_KEY` is the AES-256-GCM master key that encrypts each
+merchant's Razorpay secret at rest (§3.6). It must decode to **exactly 32 bytes**, so
+generate it rather than inventing one:
+
+```bash
+openssl rand -base64 32
+```
+
+Paste the output as the value. Leaving the placeholder in place fails immediately at
+step 3, and rotating this key later makes every previously-stored merchant secret
+undecryptable.
+
 `.env` is gitignored; `.env.example` is the committed template.
+
+**Optional variables**, both safe to leave as-is for a first run:
+
+- `OPENROUTER_API_KEY` — powers the reference agent's LLM reasoning layer (step 9).
+  Without a valid key the agent prints
+  `OPENROUTER_API_KEY not usable — falling back to deterministic picker` and completes
+  the purchase using an offline picker, so the end-to-end flow still works.
+- `PORT` — the host gateway's port, **default 3000**. Port 3000 is heavily contested; if
+  something else already holds it you will get `EADDRINUSE` at step 6. Set `PORT=3010`
+  (or anything free) in `.env`, and then pass the same port to the dashboard and the
+  agent — see steps 8 and 9, both of which default to 3000 and need telling otherwise.
 
 ### 2. Install dependencies
 
@@ -153,9 +187,27 @@ docker compose up -d --build
 > merely need fresh environment variables (Compose reads `.env` at container-create
 > time, so a changed `.env` does require a recreate).
 
-Three services come up: `postgres` on 5432, `redis` on 6379, and a containerised
+This starts three services: `postgres` on 5432, `redis` on 6379, and a containerised
 `gateway` on **3001**. All three have healthchecks, and the gateway waits for
 `service_healthy` on both dependencies before it starts.
+
+**Verify before moving on — `docker compose up` exits 0 even when a container is
+crash-looping**, so a successful-looking command is not evidence the stack is up:
+
+```bash
+docker compose ps
+```
+
+All three must report `running` with a `healthy` status (`gateway` takes ~20s to pass
+its first healthcheck). If one is `restarting` or `unhealthy`, read its logs:
+
+```bash
+docker compose logs gateway
+```
+
+The most likely cause is a missing or malformed `MERCHANT_SECRET_ENCRYPTION_KEY` from
+step 1 — the gateway validates its entire environment on boot and exits if anything is
+missing, naming the variable.
 
 ### 4. Apply the database schema
 
@@ -166,7 +218,9 @@ npm run db:migrate --workspace=gateway
 Run it through the workspace rather than a bare `npx prisma` — Prisma 7 reads its
 connection URL from `packages/gateway/prisma.config.ts`, not from `schema.prisma`.
 
-This creates the eight tables from §2.3.
+This creates **nine** tables: the eight specified in §2.3, plus `merchant_api_keys`,
+added in Phase 4.5 so a merchant can hold several individually-revocable keys (§3.6).
+`psql`'s `\dt` will also list Prisma's own `_prisma_migrations` bookkeeping table.
 
 > **⚠️ Migration safety — hand-written constraints**
 >
@@ -192,17 +246,38 @@ This creates the eight tables from §2.3.
 >
 > ```bash
 > docker compose exec postgres psql -U agentgateway -d agentgateway \
->   -c "SELECT conname FROM pg_constraint WHERE contype='c' ORDER BY 1;"   # expect 6 rows
+>   -c "SELECT conname FROM pg_constraint
+>       WHERE contype='c' AND connamespace='public'::regnamespace
+>       ORDER BY 1;"   # expect exactly 6 rows
 > ```
+>
+> The `connamespace` filter matters: without it the query also returns
+> `cardinal_number_domain_check` and `yes_or_no_check`, two constraints Postgres
+> creates in `information_schema` in every database. You would see 8 rows and have to
+> know which 2 to ignore.
 
-### 5. Run the gateway on the host
+### 5. Generate the Prisma client
+
+```bash
+npm run db:generate --workspace=gateway
+```
+
+**Required, not optional.** The client is generated into
+`packages/gateway/src/generated/prisma`, which is gitignored, so a fresh clone does not
+have it and `migrate` does not produce it here. Skipping this step makes step 6 fail
+with `Cannot find module '.../src/generated/prisma/index.js'`.
+
+Re-run it whenever `prisma/schema.prisma` changes.
+
+### 6. Run the gateway on the host
 
 ```bash
 npm run dev --workspace=gateway
 ```
 
 Binds `PORT` from `.env` (default **3000**), so it can run alongside the containerised
-gateway on 3001 without a port clash.
+gateway on 3001 without a port clash. If 3000 is taken, set a different `PORT` in `.env`
+(see step 1) and substitute it everywhere below.
 
 ```bash
 curl -s http://localhost:3000/health | jq
@@ -211,7 +286,7 @@ curl -s http://localhost:3000/health | jq
 `/health` returns **200 only when both Postgres and Redis answer**; a degraded
 dependency yields 503 with a per-dependency breakdown.
 
-### 6. Confirm the Razorpay SDK round-trips
+### 7. Confirm the Razorpay SDK round-trips
 
 ```bash
 npm run razorpay:smoke --workspace=gateway
@@ -220,11 +295,89 @@ npm run razorpay:smoke --workspace=gateway
 Creates one ₹1.00 test Order and prints it. Confirm it appears under
 Test Mode → Transactions → Orders in the Razorpay dashboard.
 
-### Optional: the dashboard
+### 8. Create a merchant and mint its API key
+
+Nothing else can be done without one: every `/v1/merchant/*` route requires it, and the
+console will not open without it.
 
 ```bash
-npm run dev --workspace=dashboard    # http://localhost:3002
+npm run merchant:create --workspace=gateway -- --name "My Merchant"
 ```
+
+The key is printed **once** and only its SHA-256 hash is stored — copy it now. See
+[Authentication & rate limiting](#authentication--rate-limiting-phase-45) for rotation
+and listing.
+
+### 9. The merchant console
+
+```bash
+npm run dev:dashboard        # http://localhost:3002
+```
+
+Open <http://localhost:3002> and paste the API key from step 8 at the prompt. It is held
+in `sessionStorage` for that tab only.
+
+**If your gateway is not on port 3000**, the console needs telling — it has no way to
+discover the port:
+
+```bash
+NEXT_PUBLIC_GATEWAY_URL=http://localhost:3010 npm run dev:dashboard
+```
+
+`NEXT_PUBLIC_GATEWAY_URL` is the base URL the browser calls for every gateway request
+and the SSE feed. It defaults to `http://localhost:3000`. Set it in `.env` to make it
+permanent. If it points at the wrong place the console loads but every screen shows
+"Could not reach the gateway at …", naming the URL it tried.
+
+Note the console's own origin (`http://localhost:3002`) must appear in
+`DASHBOARD_ORIGIN` or the gateway will refuse its requests — see
+[CORS policy](#cors-policy). The default already covers 3002.
+
+### 10. Run the reference agent
+
+The agent is a real client: it holds its own Ed25519 key, registers with the gateway,
+and drives an actual purchase end to end.
+
+**Onboard it once** — this mints its keypair and registers both protocol identities:
+
+```bash
+npm run setup --workspace=agent-client -- --api-key agk_...
+```
+
+Pass the key from step 8. The private key is written to
+`packages/agent-client/.agent-keystore.json` (owner-only, gitignored) and never leaves
+the machine — that is what makes an AP2 mandate signature meaningful (§3.1).
+
+**Then make a purchase**, over either protocol:
+
+```bash
+npm run agent --workspace=agent-client -- --protocol=x402
+npm run agent --workspace=agent-client -- --protocol=ap2
+```
+
+Both target the same cart and the same merchant and land in the same
+`razorpay_orders` row shape — that equivalence is the point of the project. Each run
+writes a full request/response trace to `packages/agent-client/traces/`, which is what
+the console's protocol tester replays.
+
+Useful flags on both commands:
+
+| Flag                  | Purpose                                                                                   |
+| --------------------- | ----------------------------------------------------------------------------------------- |
+| `--gateway-url <url>` | Gateway base URL. **Defaults to `http://localhost:3000`** — pass it if you changed `PORT` |
+| `--deterministic`     | Skip the LLM entirely and use the offline picker                                          |
+| `--api-key <key>`     | `setup` only; or set `MERCHANT_API_KEY`                                                   |
+
+The transaction appears in the console's Transactions screen immediately, over SSE.
+
+### Building for production
+
+```bash
+npm run build
+```
+
+Runs across all three workspaces: `tsc` for the gateway and agent-client, `next build`
+for the dashboard.
 
 ---
 
@@ -332,19 +485,23 @@ deliberately out of scope.
 
 ## Useful commands
 
-| Command                                                     | What it does                                                        |
-| ----------------------------------------------------------- | ------------------------------------------------------------------- |
-| `npm run dev`                                               | Gateway in watch mode on `PORT`                                     |
-| `npm run dev:dashboard`                                     | Next.js dashboard on 3002                                           |
-| `npm test`                                                  | Vitest across workspaces                                            |
-| `npm run typecheck`                                         | `tsc --noEmit` across workspaces                                    |
-| `npm run lint`                                              | ESLint across the repo                                              |
-| `npm run format`                                            | Prettier write                                                      |
-| `npm run db:migrate`                                        | `prisma migrate dev`                                                |
-| `npm run db:generate`                                       | Regenerate the Prisma client                                        |
-| `npm run merchant:create --workspace=gateway -- --name "X"` | Create a merchant and mint its API key                              |
-| `docker compose up -d --build`                              | Rebuild the gateway image and restart — use after ANY source change |
-| `docker compose down -v`                                    | Tear down and drop the volumes                                      |
+| Command                                                     | What it does                                                                         |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `npm run dev`                                               | Gateway in watch mode on `PORT`                                                      |
+| `npm run dev:dashboard`                                     | Next.js dashboard on 3002                                                            |
+| `npm run build`                                             | Production build across all workspaces (`tsc` ×2 + `next build`)                     |
+| `npm test`                                                  | Vitest across workspaces                                                             |
+| `npm run typecheck`                                         | `tsc --noEmit` across workspaces                                                     |
+| `npm run lint`                                              | ESLint across the repo                                                               |
+| `npm run format`                                            | Prettier write                                                                       |
+| `npm run db:migrate`                                        | `prisma migrate dev`                                                                 |
+| `npm run db:generate`                                       | Build the Prisma client — **required on a fresh clone**, and after any schema change |
+| `npm run merchant:create --workspace=gateway -- --name "X"` | Create a merchant and mint its API key                                               |
+| `npm run setup --workspace=agent-client -- --api-key <key>` | Onboard the reference agent (mints its Ed25519 keypair)                              |
+| `npm run agent --workspace=agent-client -- --protocol=x402` | Drive one purchase (`--protocol=ap2` for the other)                                  |
+| `npm run docker:up`                                         | `docker compose up -d --build`                                                       |
+| `docker compose up -d --build`                              | Rebuild the gateway image and restart — use after ANY source change                  |
+| `docker compose down -v`                                    | Tear down and drop the volumes                                                       |
 
 ---
 
@@ -353,23 +510,31 @@ deliberately out of scope.
 Every phase in [ROADMAP.md](ROADMAP.md) is implemented and verified against Razorpay
 test mode with live credentials.
 
-| Phase | What it delivered                                                                 |
-| ----- | --------------------------------------------------------------------------------- |
-| 0–1   | Monorepo, Docker stack, Prisma schema transcribed 1:1 from §2.3, `/health`        |
-| 2     | Row-locked spend cap (§3.5), webhook HMAC verification (§3.4), Razorpay client    |
-| 3     | x402 / AP2 / fallback adapters, Ed25519 + JCS, two-layer replay protection (§3.2) |
-| 4     | Reference AI agent — both protocols, one cart, provider-agnostic reasoning layer  |
-| 4.5   | Merchant API keys, tenant isolation, secrets encrypted at rest, rate limiting     |
-| 5     | Merchant console: guardrails, live audit feed, agent revocation, protocol tester  |
-| 6     | Chaos scenarios, load profile, this README, demo script                           |
+| Phase | What it delivered                                                                                                      |
+| ----- | ---------------------------------------------------------------------------------------------------------------------- |
+| 0–1   | Monorepo, Docker stack, Prisma schema transcribed 1:1 from §2.3, `/health`                                             |
+| 2     | Row-locked spend cap (§3.5), webhook HMAC verification (§3.4), Razorpay client                                         |
+| 3     | x402 / AP2 / fallback adapters, Ed25519 + JCS, two-layer replay protection (§3.2)                                      |
+| 4     | Reference AI agent — both protocols, one cart, provider-agnostic reasoning layer                                       |
+| 4.5   | Merchant API keys, tenant isolation, secrets encrypted at rest, rate limiting                                          |
+| 5     | Merchant console: guardrails, live audit feed, agent revocation, protocol tester                                       |
+| 6     | Chaos scenarios, load profile, this README, demo script                                                                |
+| 7     | Input validation, typed error shapes with no internal leakage, helmet + scoped CORS, gateway-only performance baseline |
+| 7.5   | Loading/empty/error/expired states, accessibility baseline, dependency hygiene                                         |
 
 **Evidence, not assertions:**
 
+- [HARDENING.md](HARDENING.md) — what was probed, what broke, what was fixed, and what
+  is deliberately out of scope
 - [docs/chaos-report.md](docs/chaos-report.md) — four chaos scenarios run live against a
   running gateway, with before/after state
-- [docs/load-profile.md](docs/load-profile.md) — latency under rising concurrency, with
-  an honest account of what the numbers do and don't mean
-- [docs/screenshots/](docs/screenshots/) — the console in both themes
+- [docs/load-profile.md](docs/load-profile.md) — end-to-end latency under rising
+  concurrency, with a live Razorpay call in every request
+- [docs/load-profile-gateway-only.md](docs/load-profile-gateway-only.md) — the same path
+  with Razorpay stubbed, isolating the gateway's own cost. Read alongside the file above,
+  never on its own: it is **not** settlement latency
+- [docs/screenshots/](docs/screenshots/) — the console in both themes, including the
+  loading, empty, error and expired-session states
 - [docs/demo-script.md](docs/demo-script.md) — the 5-minute walkthrough
 
 ## Roadmap
