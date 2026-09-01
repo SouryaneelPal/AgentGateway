@@ -1,14 +1,20 @@
-# Hardening pass (Phase 7)
+# Hardening pass (Phases 7 and 7.5)
 
-A bounded validation and hardening review of the gateway: input validation across every
-route, error-response consistency, security headers and CORS, and a performance baseline
-that isolates the gateway from its downstream.
+A bounded review in two parts. **Phase 7** covered the gateway: input validation across
+every route, error-response consistency, security headers and CORS, and a performance
+baseline that isolates the gateway from its downstream. **Phase 7.5** added an
+accessibility baseline over the merchant console — see
+[Accessibility baseline](#accessibility-baseline-phase-75).
 
-**Method.** Findings came from firing hostile input at a **running** gateway and reading
-the actual response bodies and server logs — not from reading the source and reasoning
-about what it probably does. That distinction produced every real defect below. Each fix
-carries a regression test, and each test was **mutation-verified**: the guard was
-deliberately broken, the test confirmed failing, and the guard restored.
+**Method.** Nothing here was concluded by reading the source and reasoning about what it
+probably does. Gateway findings came from firing hostile input at a **running** gateway
+and reading the actual response bodies and server logs. Console findings came from
+measuring a running browser — contrast ratios computed from the tokens, focus order and
+accessible names read off the live accessibility tree. That distinction produced every
+real defect below; several were invisible to inspection.
+
+Each gateway fix carries a regression test, and each test was **mutation-verified**: the
+guard was deliberately broken, the test confirmed failing, and the guard restored.
 
 ---
 
@@ -268,6 +274,80 @@ contention rather than with the contention engineered away.
 
 ---
 
+## Accessibility baseline (Phase 7.5)
+
+**A baseline pass over the merchant console, not a claim of WCAG compliance.** It covered
+colour contrast, keyboard reachability, and accessible names on the four console screens.
+It was not an audit against the full WCAG 2.2 AA success criteria, it involved no testing
+with an actual screen reader or with real assistive-technology users, and nothing here
+should be read as certifying the application as accessible.
+
+Contrast was **measured, not eyeballed** — every foreground/background pair in the design
+system was run through the WCAG relative-luminance formula against the ground it actually
+renders on, rather than judged by eye. Two of them failed, and neither was visible as a
+problem by inspection.
+
+### Text contrast — `--color-ink-faint`
+
+Failed AA's 4.5:1 for normal text in **both** themes, against the lowest-contrast ground
+each one lands on:
+
+| Theme | Before    | Ratio      | After     | Ratio      |
+| ----- | --------- | ---------- | --------- | ---------- |
+| Light | `#8a8a92` | **3.06:1** | `#6b6b72` | **4.72:1** |
+| Dark  | `#6e6e78` | **3.44:1** | `#85858e` | **4.75:1** |
+
+This token is not decoration — it carries table column headers, timestamps, empty-state
+hints and the sign-out control. The cost of the fix is a compressed grey ramp: muted and
+faint now sit closer together than the original design intended. That is the honest
+trade for legibility on a three-tier neutral scale.
+
+### Non-text contrast — control borders
+
+WCAG 1.4.11 requires 3:1 for visual information that identifies a user-interface
+component. Control borders were at **1.56:1**, and here the border genuinely is the only
+identifier: a text field's background (`--color-surface`) sits on a card
+(`--color-raised`) at 1.04:1, so with the border removed there is nothing to see.
+
+Rather than darkening every hairline in the product, interactive controls moved to a new
+`--color-control-edge` token — **3.38:1** light, **3.28:1** dark — while dividers and
+connector lines stay quiet on `--color-edge-strong`.
+
+### What already passed
+
+Worth recording, because it means the audit found real problems rather than manufacturing
+them: the amber accent (4.76–8.37:1 across every ground it sits on, the floor being the
+active nav item on its own tint) and every status badge — settled, awaiting, pending,
+rejected, failed — already cleared 4.5:1 in both themes and were left unchanged. Status is
+also never encoded by colour alone; each badge carries its own glyph and word, so the
+distinction survives greyscale and colour-blindness.
+
+The ratios and the reasoning are recorded inline in
+[app/globals.css](packages/dashboard/app/globals.css) beside the tokens themselves, so a
+future edit to a colour has the constraint in front of it.
+
+### Keyboard navigation — transaction row expansion
+
+The decision trail for a payment request could only be opened by clicking the table row.
+The handler lived on `<tr onClick>`, which is not focusable, is not in the tab order, is
+not activatable by Enter or Space, and is announced by nothing.
+
+The "Why?" affordance is now a real `<button>` carrying `aria-expanded` and
+`aria-controls` pointing at the panel it opens, plus a row-specific accessible name
+(`"Why? decision trail for <agent>"`) — because "Why?" repeated down a column gives a
+screen-reader user nothing to tell the rows apart. Row click is retained as a mouse
+convenience.
+
+Verified functionally rather than structurally: focusing the button and pressing Enter
+flipped `aria-expanded` to `true` and rendered the audit trail.
+
+Also added in the same pass: a skip link past the sidebar, `aria-label` on the nav
+landmark, `aria-current` on the active link, `scope="col"` and `sr-only` captions on both
+tables, `aria-label` on the repeated revoke buttons, and polite live regions for the SSE
+feed and the protocol-tester run log.
+
+---
+
 ## Explicitly out of scope
 
 Unchanged by this pass, by instruction:
@@ -282,7 +362,14 @@ Not attempted, and worth naming rather than leaving implied:
 
 - No authenticated fuzzing campaign or property-based testing — the probing was
   systematic but hand-built.
-- No dependency CVE re-audit (last run in Phase 4.5).
+- **No full WCAG audit.** The accessibility work above is a baseline over contrast,
+  keyboard reachability and accessible names on four screens. Untested: screen readers,
+  zoom and reflow to 400%, focus order through the expanded audit trail, and the
+  remaining WCAG 2.2 AA criteria. The console is more usable than it was; it is not
+  certified.
+- Dependency CVE audit is current — `npm audit --workspaces` was re-run in Phase 7.5 and
+  reported 0 vulnerabilities. Only in-range patch bumps were taken; the outstanding
+  majors are listed in that phase's commit message with the reason each was declined.
 - The webhook quarantine bounds repeated _identical_ forgeries, but an attacker varying
   the body can still add rows. Bounding that needs retention/rate-limiting policy on
   `webhook_events`, which is a design decision rather than a fix.

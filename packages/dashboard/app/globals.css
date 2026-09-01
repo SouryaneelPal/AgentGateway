@@ -35,7 +35,7 @@
 
   /* Boundary of an interactive control. WCAG 1.4.11 wants 3:1 for anything whose edge
      is what identifies it as a component, and an input's border is exactly that here:
-     the field background (--color-surface) sits on a card (--color-raised) at 1.01:1,
+     the field background (--color-surface) sits on a card (--color-raised) at 1.04:1,
      so without the border there is nothing to see. Kept separate from
      --color-edge-strong so hairline dividers and connector lines stay quiet. */
   --color-control-edge: #8c8c88;
