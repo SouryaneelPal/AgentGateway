@@ -23,7 +23,8 @@
     "merchant:create": "tsx scripts/create-merchant.ts",
     "chaos": "tsx scripts/chaos.ts",
     "loadtest": "tsx scripts/loadtest.ts",
-    "loadtest:gateway-only": "tsx scripts/loadtest-gateway-only.ts"
+    "loadtest:gateway-only": "tsx scripts/loadtest-gateway-only.ts",
+    "soak": "tsx scripts/soak.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",

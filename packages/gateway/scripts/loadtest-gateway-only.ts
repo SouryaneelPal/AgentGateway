@@ -39,7 +39,8 @@ import { canonicalizeForSigning } from '../src/crypto/canonicalize.js';
 import { generateAgentKeypair, signCanonicalPayload } from '../src/crypto/ed25519-verify.js';
 import { encryptSecret, parseEncryptionKey } from '../src/crypto/secret-box.js';
 import { setRazorpayClientForTesting } from '../src/adapters/adapter-support.js';
-import { RazorpayClient, type RazorpayClientOptions } from '../src/razorpay/razorpay-client.js';
+import { RazorpayClient } from '../src/razorpay/razorpay-client.js';
+import { createStubSdk } from './razorpay-stub.js';
 
 const PORT = Number(process.env['LOADTEST_PORT'] ?? 3199);
 const GATEWAY = `http://localhost:${PORT}`;
@@ -59,51 +60,6 @@ function percentile(sorted: number[], p: number): number {
   if (sorted.length === 0) return 0;
   const index = Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1);
   return sorted[Math.max(0, index)] ?? 0;
-}
-
-/**
- * A stand-in for the Razorpay SDK instance.
- *
- * Returns immediately with a well-formed response. There is no artificial delay: the
- * point is to remove the network from the measurement entirely, so that what remains is
- * unambiguously the gateway's own work.
- */
-function createStubSdk(): NonNullable<RazorpayClientOptions['client']> {
-  let counter = 0;
-  const stub = {
-    orders: {
-      create: async (body: { amount: number; receipt: string; notes?: unknown }) => {
-        counter += 1;
-        return {
-          id: `order_stub${String(counter).padStart(10, '0')}`,
-          entity: 'order',
-          amount: body.amount,
-          amount_paid: 0,
-          amount_due: body.amount,
-          currency: 'INR',
-          receipt: body.receipt,
-          status: 'created',
-          attempts: 0,
-          notes: body.notes ?? {},
-          created_at: Math.floor(Date.now() / 1000),
-        };
-      },
-    },
-    paymentLinks: {
-      create: async (body: { amount: number; reference_id?: string }) => {
-        counter += 1;
-        return {
-          id: `plink_stub${String(counter).padStart(10, '0')}`,
-          amount: body.amount,
-          currency: 'INR',
-          reference_id: body.reference_id,
-          short_url: `https://rzp.io/i/stub${counter}`,
-          status: 'created',
-        };
-      },
-    },
-  };
-  return stub as unknown as NonNullable<RazorpayClientOptions['client']>;
 }
 
 async function cleanup(): Promise<void> {

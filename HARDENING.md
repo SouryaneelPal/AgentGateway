@@ -386,6 +386,18 @@ feed and the protocol-tester run log.
 
 ---
 
+## Sustained load
+
+The measurements above are bursts. `docs/soak-test.md` holds a moderate load steady for
+sixteen minutes against the same stubbed-Razorpay harness and samples memory, Postgres and
+Redis connection counts, error rate and latency every 2.5 minutes — the things that look
+fine in a 200-request burst and only misbehave over time.
+
+What that does **not** cover, and what closing the gap would actually require, is set out
+in WHITEPAPER.md §5.5 "Path to Production".
+
+---
+
 ## Explicitly out of scope
 
 Unchanged by this pass, by instruction:
