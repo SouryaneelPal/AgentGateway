@@ -11,20 +11,20 @@ Derived from [ROADMAP.md](ROADMAP.md). Design rationale lives in [WHITEPAPER.md]
 
 ## Phase 1 — Foundation & Infrastructure Setup
 
-- [ ] Scaffold the repo with a strict TypeScript config
-- [ ] Configure ESLint and Prettier
-- [ ] Write `docker-compose.yml` bringing up Postgres + Redis + the app in one command
-- [ ] Build the environment config module
-- [ ] Commit `.env.example` and keep secrets out of version control
-- [ ] Implement the `/health` endpoint checking DB and Redis connectivity
-- [ ] Wire in Razorpay test-mode keys
-- [ ] Write a manual script that creates one test Order and confirms the SDK round-trips correctly
+- [x] Scaffold the repo with a strict TypeScript config
+- [x] Configure ESLint and Prettier
+- [x] Write `docker-compose.yml` bringing up Postgres + Redis + the app in one command
+- [x] Build the environment config module
+- [x] Commit `.env.example` and keep secrets out of version control
+- [x] Implement the `/health` endpoint checking DB and Redis connectivity
+- [x] Wire in Razorpay test-mode keys
+- [x] Write a manual script that creates one test Order and confirms the SDK round-trips correctly
 
 **Validation:**
 
-- [ ] `docker-compose up` succeeds from a clean clone
-- [ ] `/health` returns 200
-- [ ] A test Order appears in the Razorpay test-mode dashboard
+- [x] `docker-compose up` succeeds from a clean clone
+- [x] `/health` returns 200
+- [x] A test Order appears in the Razorpay test-mode dashboard
 
 ## Phase 2 — Database Layer, Policy Engine & Razorpay Core
 
@@ -117,6 +117,58 @@ Derived from [ROADMAP.md](ROADMAP.md). Design rationale lives in [WHITEPAPER.md]
 
 - [x] Every chaos scenario has a corresponding, visible entry in the audit trail
 - [ ] The video shows one real failure end-to-end, not just a success path
+
+## Phase 7 — Validation, Error Handling & Security Headers
+
+Not in ROADMAP's original 0–6 sequence; added after Phase 6 as a hardening pass. Full
+write-up in [HARDENING.md](HARDENING.md).
+
+- [x] Audit every route across all three workspaces against negative/zero/non-integer
+      amounts, oversized strings, malformed JSON, unicode, null bytes and
+      injection-shaped input
+- [x] Reject control characters body-wide (the fallback adapter persists the whole body,
+      so per-field checks alone were insufficient)
+- [x] Guard `uuid` columns with `isUuid()` so a non-UUID id is a 400, not a Postgres error
+- [x] Bound every untrusted string at `readString`, the helper all three adapters share
+- [x] Prove Prisma's parameterization with a real round-trip test, including through the
+      `$queryRaw` spend-cap path — not assumed
+- [x] Stop 5xx responses echoing `error.message` (they leaked absolute source paths, our
+      own source lines and raw Postgres errors to unauthenticated callers)
+- [x] Register `@fastify/helmet`; replace reflect-any-origin CORS with an explicit
+      `DASHBOARD_ORIGIN` allowlist, shared with the SSE route so the two cannot drift
+- [x] Add a gateway-only load profile with Razorpay stubbed at the SDK boundary
+- [x] Fix the webhook event-id claiming hole found while probing: an unverified delivery
+      could reserve an event id and mute the genuine settlement webhook
+
+**Validation:**
+
+- [x] Hostile-input probe against a live gateway in `NODE_ENV=production`: no 5xx, no
+      response matching any internal-detail pattern
+- [x] Every fix carries a regression test, and every test was mutation-verified — the
+      guard broken deliberately, the test confirmed failing, the guard restored
+
+## Phase 7.5 — Frontend Polish, Accessibility & Dependency Hygiene
+
+- [x] Give every console screen a real loading state distinct from empty (each list
+      began as `useState([])`, so the first paint asserted "no data" before data arrived)
+- [x] Disable Save on the policy screen until the current policy loads — the form
+      defaults to an empty policy and would have written it over the merchant's real one
+- [x] Distinguish gateway-unreachable from gateway-refused, worded centrally, with retry
+- [x] Recover from a mid-session 401 in place, without a page reload
+- [x] Replace the SSE retry storm with capped exponential backoff
+- [x] Make the transaction decision trail keyboard-reachable: a real button with
+      `aria-expanded`/`aria-controls`, not a `<tr onClick>`
+- [x] Fix the two measured WCAG failures — `--color-ink-faint` (3.06/3.44 → 4.72/4.75)
+      and control borders (1.56 → 3.38/3.28 via `--color-control-edge`)
+- [x] Scroll wide tables instead of clipping them; keep the page free of horizontal overflow
+- [x] Re-run `npm audit --workspaces` (0 findings) and take in-range patch bumps only
+
+**Validation:**
+
+- [x] Contrast measured against the tokens, not eyeballed; ratios recorded in globals.css
+- [x] Keyboard activation confirmed functionally — focus the button, press Enter, the
+      trail expands and `aria-expanded` flips
+- [x] No page-level horizontal overflow at 1280 and 1920
 
 ## Notes
 

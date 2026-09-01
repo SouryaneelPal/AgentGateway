@@ -119,6 +119,15 @@ Every adapter implements the same interface, so the router doesn't need to know 
 interface ProtocolAdapter {
   readonly protocolName: 'x402' | 'ap2' | 'fallback';
 
+  // Whether a `requires_human_approval` policy outcome is a stop or the intended route.
+  // True only for fallbackAdapter, whose Payment Link IS the human-approval step.
+  readonly settlesViaHumanApproval: boolean;
+
+  // Step 0: shape-based self-identification. This is the seam the router turns on — it
+  // asks each adapter whether a request is theirs rather than switching on a URL, so a
+  // new protocol is a new class and not an edit to the router.
+  matches(request: IncomingRequest): boolean;
+
   // Step 1: protocol-native validation (signatures, envelope structure, expiry)
   validate(rawRequest: IncomingRequest): Promise<ValidationResult>;
 
@@ -261,6 +270,8 @@ Design notes worth stating explicitly in an interview:
 - `payment_requests.idempotency_key` is unique at the DB level so a retried request is a `SELECT`, not a re-`INSERT` — correctness is enforced by the schema, not just application logic.
 - `audit_log` is intentionally append-only (no `updated_at`, no `UPDATE`/`DELETE` grants in production) — it exists to answer "what happened and why," and a mutable audit log answers nothing.
 
+> **Later addition:** `merchant_api_keys` is not specified above because it did not exist at the time this section was written — it was introduced in Phase 4.5 to let one merchant hold several individually-revocable API keys. Its shape and rationale are in §3.6. The eight tables above are unchanged by it.
+
 ### 2.4 API & Route Specification
 
 **Gateway-facing routes (called by agents):**
@@ -272,6 +283,7 @@ Design notes worth stating explicitly in an interview:
 | `POST` | `/v1/ap2/mandates` | Submit a signed `IntentMandate`; returns `202 Accepted` + `payment_request_id` if valid, or a typed rejection |
 | `GET` | `/v1/ap2/mandates/:id` | Poll settlement status (used until webhook confirms; also pushed via SSE) |
 | `POST` | `/v1/fallback/payment-links` | Generates a human-approval Payment Link for non-protocol agents |
+| `GET` | `/health` | Liveness/readiness: 200 only when both Postgres and Redis answer, 503 with a per-dependency breakdown otherwise |
 | `POST` | `/webhooks/razorpay` | Razorpay's webhook target — verifies `X-Razorpay-Signature`, updates `razorpay_orders`/`payment_requests` |
 
 Example — `402` response body/header:
@@ -403,7 +415,7 @@ Adding only the first is a common and dangerous half-fix. If a route authenticat
 
 - **API keys.** Each merchant holds one or more keys in `merchant_api_keys`. Only a SHA-256 **hash** is stored, alongside a short non-secret prefix for identification and a `last_used_at` timestamp; the key itself is displayed once at creation and is not recoverable. A leaked database yields hashes, not working credentials. Keys are individually revocable, so one can be rotated without disturbing the others — which is why this is a separate table rather than a column on `merchants`.
 - **A scope-wide `preHandler`** authenticates every route in the merchant plugin. It is registered on the plugin, not per route, so a merchant route added later is authenticated by default rather than by remembering to opt in. `POST /v1/merchant/agents/register` is covered by it like any other route.
-- **Merchant identity is derived, never asserted.** The authenticated merchant id is attached to the request and read from there. No `/v1/merchant/*` route accepts a `merchantId` parameter; supplying one is rejected outright rather than silently ignored, so a stale client is corrected instead of quietly believing it chose the merchant.
+- **Merchant identity is derived, never asserted.** Every `/v1/merchant/*` handler takes the merchant id from the authenticated API key and never reads it from the request. That is the property that closes the IDOR, and it holds on every route without exception: a `merchantId` in a body or query string is not consulted anywhere, so supplying one cannot redirect a request at another tenant. How an unexpected `merchantId` is *answered* varies by route, and the distinction is worth stating precisely rather than overclaiming: `POST /v1/merchant/agents/register` rejects it outright with a 400, because that route previously accepted one and a stale client deserves to be corrected rather than left believing it chose the merchant. Other routes — `PUT /v1/merchant/policy`, for instance — read only the fields they recognise and ignore the rest, which is silent but equally safe, since the ignored field was never an input to begin with.
 - **Merchant creation is not an HTTP route at all.** A merchant cannot be bootstrapped through a surface that requires that merchant's own key, so onboarding is an operator action with direct database access — which is also the honest trust model, since in production a merchant is onboarded by Razorpay rather than by an anonymous HTTP call.
 - **Secrets at rest.** `merchants.razorpay_key_secret_encrypted` is encrypted with AES-256-GCM under a master key supplied in the environment, in a versioned envelope (`v1:iv:tag:ciphertext`) so the scheme can be rotated without guessing at old rows. GCM is authenticated, so tampering is detected on decrypt rather than yielding silent garbage, and a random 96-bit IV means identical plaintexts never produce identical ciphertext. The column has carried the `_encrypted` name since §2.3; a column named as though it were protected while holding plaintext is worse than an honestly-named one, because every reader assumes the protection is already there.
 - **Rate limiting** is keyed on the caller's identity — the merchant API key on `/v1/merchant/*`, the agent identity on the payment-facing routes — rather than on IP, since agents and dashboards sit behind NAT where an IP-keyed limit would either punish co-located callers or be trivially evaded. The webhook route is exempt: dropping a settlement confirmation because Razorpay burst is far worse than the burst (§1.3).
@@ -484,4 +496,4 @@ Two options were considered: pessimistic locking (`SELECT ... FOR UPDATE`, used 
 ### 5.4 Known Limitations (stated honestly, not hidden)
 - x402's reference implementation assumes on-chain stablecoin settlement; this build reinterprets its HTTP-402 *shape* onto Razorpay's INR rails rather than implementing literal token transfers — a deliberate substitution, documented as such.
 - UAP is not implemented, because it is not yet a public, stable, RBI-approved specification to build against — the adapter pattern is designed so it can be added the moment it is.
-- This is a test-mode build; production hardening (mTLS between gateway and merchant systems, per-agent rate limiting, multi-region webhook redundancy) is scoped as explicit future work, not silently assumed to already exist.
+- This is a test-mode build; production hardening (mTLS between gateway and merchant systems, multi-region webhook redundancy) is scoped as explicit future work, not silently assumed to already exist. Per-agent rate limiting was originally listed here too; it was built in Phase 4.5 and its keying corrected in Phase 6, so it has been removed from this list rather than left claiming to be absent (§3.6).

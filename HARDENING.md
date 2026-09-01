@@ -139,9 +139,16 @@ injection-shaped strings, and wrong content types.
 
 | Workspace    | Surface              | Result                                                                                   |
 | ------------ | -------------------- | ---------------------------------------------------------------------------------------- |
-| gateway      | 11 routes            | all hostile input → typed 4xx; no 5xx; no leaks                                          |
+| gateway      | 13 routes            | all hostile input → typed 4xx; no 5xx; no leaks                                          |
 | dashboard    | `GET /api/traces`    | takes no caller input at all — nothing to validate                                       |
 | agent-client | CLI + LLM tool calls | no server surface; spend ceiling already enforced locally, not trusted from model output |
+
+> **Correction (documentation consistency audit).** This table originally said
+> **11 routes**. The gateway has **13**: the Phase 7 enumeration missed `GET /health` and
+> `GET /v1/merchant/transactions`, so neither was in the probe matrix. Both were
+> subsequently probed (18 further hostile requests against a live gateway), and the gap
+> was not cosmetic — see [Query and route parameters](#query-and-route-parameters-found-by-the-audit)
+> below for what it hid.
 
 Bounds live in one place, [validation.ts](packages/gateway/src/validation.ts):
 identifiers 128, nonces 256, signatures 1024, URLs 2048, descriptions 512, amounts
@@ -178,6 +185,37 @@ parameters, but that is exactly the claim worth testing rather than trusting: a
 concatenating implementation would raise a syntax error where this returns a row.
 
 All in [test/input-validation.test.ts](packages/gateway/test/input-validation.test.ts).
+
+### Query and route parameters (found by the audit)
+
+The body-wide control-character hook in `server.ts` inspects `request.body` and nothing
+else. Phase 7 hardened query and route parameters on the protocol routes accordingly —
+but only on the routes it knew about. The two routes missing from its count had never
+been probed, and both were vulnerable to the same two defects the pass had already fixed
+elsewhere:
+
+| Route                                 | Input                             | Before  | After |
+| ------------------------------------- | --------------------------------- | ------- | ----- |
+| `GET /v1/merchant/transactions`       | `status=` / `protocol=` null byte | **500** | 400   |
+| `GET /v1/merchant/audit-log`          | `payment_request_id=` null byte   | **500** | 400   |
+| `GET /v1/merchant/audit-log`          | `payment_request_id=` non-UUID    | **500** | 400   |
+| `POST /v1/merchant/agents/:id/revoke` | `:id` null byte                   | **500** | 400   |
+| `POST /v1/merchant/agents/:id/revoke` | `:id` non-UUID                    | **500** | 400   |
+
+Same two root causes as findings 1 and 3: a null byte reaching a Postgres text comparison
+(error `22021`), and a non-UUID value reaching a `uuid` column. `GET /health` was clean
+throughout — it takes no input it uses.
+
+None of these leaked internal detail, because the unconditional 5xx suppression from
+finding 2 was already in place. That is the layered defence working as intended: the
+input guard was missing, and the output guard still held.
+
+**Fixed** by applying the existing `isUuid()` / `isSafeString()` guards to these
+parameters. Re-probed after the fix: **18 hostile requests, 0 5xx, 0 leaks**
+(`200 ×10, 400 ×3, 401 ×2, 404 ×2, 431 ×1`).
+
+The lesson is about the count, not the code: a coverage claim is only as good as the
+enumeration behind it, and "every route" meant "every route I listed".
 
 ### Where validation is deliberately permissive
 

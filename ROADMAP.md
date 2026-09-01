@@ -2,9 +2,18 @@
 
 This is the execution companion to [WHITEPAPER.md](WHITEPAPER.md), which remains the
 source of record for the system's architecture, protocol analysis, database schema, and
-security design. Everything below is Section 4 of that document, extracted verbatim so
-the build sequence can be tracked independently of the design narrative around it.
-Section references (§2.2, §3.4, §3.5, §5.3) point back into WHITEPAPER.md.
+security design. Section references (§2.2, §3.4, §3.5, §5.3) point back into
+WHITEPAPER.md.
+
+Phases 1–6 are Section 4 of that document, extracted verbatim, so the build sequence can
+be tracked independently of the design narrative around it — and they are kept
+byte-identical to it.
+
+**This file is the living plan; §4 is a dated design snapshot.** Phases 4.5, 7 and 7.5
+were identified during the build and appear only here. They are deliberately *not*
+back-ported into §4, for the same reason §2.3 still specifies eight tables: §4 records
+what was planned at the time it was written, and rewriting it would falsify that record
+rather than improve it. The working checklist is [tasks.todo](tasks.todo).
 
 ---
 
@@ -74,3 +83,22 @@ Section references (§2.2, §3.4, §3.5, §5.3) point back into WHITEPAPER.md.
 - README with the architecture diagram, setup instructions, and an explicit "known limitations" section (see §5.3) — the buildathon brief rewards intellectual honesty over overclaiming.
 - 5-minute demo video script: (1) the problem in 30 seconds, (2) the trust-boundary rule stated on camera, (3) both protocol flows completing live, (4) the spend-cap breach failure handled gracefully on camera, (5) the audit trail for that exact failure shown in the dashboard.
 **Validation checklist:** every chaos scenario has a corresponding, visible entry in the audit trail; the video shows one real failure end-to-end, not just a success path.
+
+### Phase 7 — Validation, Error Handling & Security Headers
+**Stack:** Shared bounds module in the gateway; `@fastify/helmet`; a Razorpay SDK stub for isolated measurement.
+**Deliverables:**
+- Input validation across every route: bounded strings, positive-integer amounts with a ceiling, UUID-shaped ids checked before they reach a `uuid` column, and body-wide rejection of control characters (the fallback adapter persists the entire request body, so per-field checks alone leave a gap).
+- SQL-injection resistance demonstrated by a round-trip test rather than asserted — including through the one `$queryRaw` in the codebase, §3.5's row-locked spend cap.
+- A typed, predictable error shape on every path, with 5xx responses carrying a request id instead of the underlying message (which had been leaking absolute source paths and raw driver errors to unauthenticated callers).
+- `@fastify/helmet` with a JSON-appropriate CSP, and CORS narrowed from reflect-any-origin to an explicit `DASHBOARD_ORIGIN` allowlist shared with the SSE route.
+- A gateway-only load profile with Razorpay stubbed at the SDK boundary, published alongside — never instead of — the end-to-end profile.
+**Validation checklist:** a hostile-input probe against a live gateway in `NODE_ENV=production` produces no 5xx and no response matching any internal-detail pattern; every fix carries a regression test, and every test is mutation-verified by breaking the guard and confirming the test fails.
+
+### Phase 7.5 — Frontend Polish, Accessibility & Dependency Hygiene
+**Stack:** The existing Next.js console; WCAG 2.x contrast maths computed against the design tokens.
+**Deliverables:**
+- A real, designed state for loading, empty, gateway-unreachable and expired-session on all four console screens — each list previously began as `useState([])`, so the first paint told a merchant they had no data before any had arrived.
+- Recovery from a mid-session `401` in place, without a page reload and without losing the operator's position.
+- Accessibility baseline: keyboard reachability for every interactive control, accessible names on repeated controls, and correction of the two measured contrast failures.
+- Dependency hygiene: a fresh `npm audit --workspaces`, with in-range patch bumps taken and major upgrades explicitly declined this close to submission.
+**Validation checklist:** contrast measured against the tokens rather than eyeballed; keyboard activation confirmed functionally rather than structurally; no page-level horizontal overflow at 1280 or 1920. This is a baseline pass, not a WCAG audit — see [HARDENING.md](HARDENING.md).

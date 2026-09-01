@@ -10,7 +10,12 @@ import { prisma } from '../db/prisma-client.js';
 import { isAllowedOrigin } from '../config/cors.js';
 // Bounds come from the shared module so these routes and the protocol adapters cannot
 // drift apart on what counts as an acceptable identifier.
-import { MAX_IDENTIFIER_LENGTH, MAX_SPENDING_LIMIT_PAISE } from '../validation.js';
+import {
+  MAX_IDENTIFIER_LENGTH,
+  MAX_SPENDING_LIMIT_PAISE,
+  isSafeString,
+  isUuid,
+} from '../validation.js';
 import { authenticatedMerchantId, requireMerchantAuth } from '../auth/merchant-auth.js';
 import { parseMerchantPolicy } from '../policy/policy-engine.js';
 
@@ -371,6 +376,23 @@ export const merchantRoutes: FastifyPluginAsync = async (app) => {
       const merchantId = authenticatedMerchantId(request);
       const { status, protocol } = request.query;
 
+      // These are filters, not identifiers, so they are bounded rather than enumerated —
+      // an unknown value legitimately matches nothing. What they must NOT contain is a
+      // control character: Postgres cannot store or compare U+0000, so a null byte here
+      // raised error 22021 and surfaced as a 500. Query strings never reach the
+      // body-wide hook in server.ts, which only inspects request.body.
+      for (const [name, value] of [
+        ['status', status],
+        ['protocol', protocol],
+      ] as const) {
+        if (value !== undefined && !isSafeString(value, MAX_IDENTIFIER_LENGTH)) {
+          return reply.code(400).send({
+            error: 'malformed_request',
+            detail: `${name} must be a non-empty string of at most ${MAX_IDENTIFIER_LENGTH} characters, free of control characters`,
+          });
+        }
+      }
+
       const rows = await prisma.paymentRequest.findMany({
         where: {
           merchantId,
@@ -424,6 +446,17 @@ export const merchantRoutes: FastifyPluginAsync = async (app) => {
   app.get<{ Querystring: AuditLogQuery }>('/v1/merchant/audit-log', async (request, reply) => {
     const merchantId = authenticatedMerchantId(request);
     const paymentRequestId = request.query.payment_request_id;
+
+    // payment_request_id indexes a uuid column. Anything that is not a syntactically
+    // valid UUID fails inside Postgres rather than matching no rows, which surfaced as a
+    // 500 for what is plainly a bad request — the same defect Phase 7 fixed on the
+    // protocol routes. Query parameters also bypass the body-wide control-character hook
+    // in server.ts, which only inspects request.body, so a null byte lands here too.
+    if (paymentRequestId !== undefined && !isUuid(paymentRequestId)) {
+      return reply
+        .code(400)
+        .send({ error: 'malformed_request', detail: 'payment_request_id must be a UUID' });
+    }
 
     if (typeof paymentRequestId === 'string' && paymentRequestId.length > 0) {
       // Scoped to the authenticated merchant: another tenant's request id yields
@@ -512,6 +545,14 @@ export const merchantRoutes: FastifyPluginAsync = async (app) => {
    */
   app.post<{ Params: AgentParams }>('/v1/merchant/agents/:id/revoke', async (request, reply) => {
     const merchantId = authenticatedMerchantId(request);
+
+    // Route parameters bypass the body-wide control-character hook, and this one indexes
+    // a uuid column — see the note on audit-log above.
+    if (!isUuid(request.params.id)) {
+      return reply
+        .code(400)
+        .send({ error: 'malformed_request', detail: 'agent id must be a UUID' });
+    }
 
     const agent = await prisma.agentIdentity.findFirst({
       where: { id: request.params.id, merchantId },
