@@ -6,10 +6,12 @@ import { listAgents, getPolicy } from '../../lib/api-client';
 import {
   Button,
   Card,
+  ErrorState,
   Mono,
   PageHeader,
   ProtocolTag,
   RawToggle,
+  Skeleton,
 } from '../../components/primitives';
 
 /**
@@ -242,15 +244,38 @@ function PipelineColumn({ trace }: { trace: Trace }) {
   );
 }
 
+type Phase = 'loading' | 'ready' | 'failed';
+
 export default function ProtocolTesterPage() {
+  const [phase, setPhase] = useState<Phase>('loading');
   const [traces, setTraces] = useState<Trace[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [liveLog, setLiveLog] = useState<string[]>([]);
   const [running, setRunning] = useState(false);
 
-  const load = useCallback(async () => {
-    const response = await fetch('/api/traces', { cache: 'no-store' });
-    const body = (await response.json()) as { traces: Trace[] };
-    setTraces(body.traces);
+  /**
+   * Reads the recorded runs.
+   *
+   * Previously this had no try/catch at all: if /api/traces failed or returned something
+   * that was not JSON, the promise rejected unhandled and the screen sat on "No runs
+   * recorded yet" forever — telling the operator there was no data when the truth was
+   * that it had not managed to look.
+   */
+  const load = useCallback(async (retry = false) => {
+    if (retry) {
+      setPhase('loading');
+      setLoadError(null);
+    }
+    try {
+      const response = await fetch('/api/traces', { cache: 'no-store' });
+      if (!response.ok) throw new Error(`The trace reader answered ${response.status}.`);
+      const body = (await response.json()) as { traces?: Trace[] };
+      setTraces(body.traces ?? []);
+      setPhase('ready');
+    } catch (cause) {
+      setLoadError(cause instanceof Error ? cause.message : 'Could not read the recorded runs.');
+      setPhase('failed');
+    }
   }, []);
 
   useEffect(() => {
@@ -349,7 +374,9 @@ export default function ProtocolTesterPage() {
       />
 
       {liveLog.length > 0 && (
-        <Card className="mt-5 p-4">
+        /* The run reports progress line by line; polite so it is read after whatever the
+           user is currently on rather than interrupting them mid-sentence. */
+        <Card className="mt-5 p-4" role="log" ariaLive="polite" ariaLabel="Live run progress">
           <p className="t-micro" style={{ color: 'var(--color-accent)' }}>
             Live run
           </p>
@@ -363,7 +390,43 @@ export default function ProtocolTesterPage() {
         </Card>
       )}
 
-      {traces.length === 0 ? (
+      {phase === 'loading' ? (
+        <div className="mt-6 flex flex-col gap-6 lg:flex-row" aria-busy="true">
+          <span className="sr-only">Loading recorded runs…</span>
+          {[0, 1].map((column) => (
+            <div key={column} className="min-w-0 flex-1">
+              <div className="mb-3">
+                <Skeleton width="30%" height={14} />
+              </div>
+              <div className="space-y-2">
+                {[0, 1, 2, 3].map((stage) => (
+                  <div
+                    key={stage}
+                    className="border p-3"
+                    style={{
+                      borderColor: 'var(--color-edge)',
+                      borderRadius: 'var(--radius-md)',
+                    }}
+                  >
+                    <Skeleton width="40%" height={13} />
+                    <div className="mt-2">
+                      <Skeleton width="75%" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : phase === 'failed' ? (
+        <Card className="mt-6">
+          <ErrorState
+            title="Could not read the recorded runs"
+            detail={`${loadError ?? 'The trace reader did not answer.'} Traces are read from packages/agent-client/traces.`}
+            onRetry={() => void load(true)}
+          />
+        </Card>
+      ) : traces.length === 0 ? (
         <Card className="mt-6 p-8 text-center">
           <p className="t-body font-medium">No runs recorded yet</p>
           <p className="t-small mt-1" style={{ color: 'var(--color-ink-muted)' }}>

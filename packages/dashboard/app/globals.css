@@ -29,13 +29,22 @@
   --color-edge-strong: #cfcfc9;
   --color-ink: #17171a;
   --color-ink-muted: #5f5f66;
-  --color-ink-faint: #8a8a92;
+  /* 4.72:1 on sunken, the lowest-contrast ground it lands on. Was #8a8a92 (3.06:1) —
+     it carries table headers, timestamps and hints, which are text, not decoration. */
+  --color-ink-faint: #6b6b72;
+
+  /* Boundary of an interactive control. WCAG 1.4.11 wants 3:1 for anything whose edge
+     is what identifies it as a component, and an input's border is exactly that here:
+     the field background (--color-surface) sits on a card (--color-raised) at 1.01:1,
+     so without the border there is nothing to see. Kept separate from
+     --color-edge-strong so hairline dividers and connector lines stay quiet. */
+  --color-control-edge: #8c8c88;
 
   /* ---- the single accent ---- */
   --color-accent: #a15c00;
   --color-accent-hover: #7d4700;
   --color-accent-ground: #fdf4e6;
-  --color-accent-edge: #e8c48a;
+  --color-accent-edge: #a88e64;
 
   /* ---- status: hue carries a hint, the glyph carries the meaning ---- */
   --color-ok: #1c6b45;
@@ -69,12 +78,15 @@
   --color-edge-strong: #3d3d44;
   --color-ink: #ecece9;
   --color-ink-muted: #9d9da6;
-  --color-ink-faint: #6e6e78;
+  /* 4.75:1 on raised. Was #6e6e78 (3.44:1). */
+  --color-ink-faint: #85858e;
+
+  --color-control-edge: #6b6b71;
 
   --color-accent: #e0a33c;
   --color-accent-hover: #f0b856;
   --color-accent-ground: #2a2113;
-  --color-accent-edge: #5c4620;
+  --color-accent-edge: #7a6746;
 
   --color-ok: #5cc08d;
   --color-ok-ground: #14251c;
@@ -145,6 +157,64 @@ body {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
   border-radius: 2px;
+}
+
+/*
+ * Announced to screen readers, invisible on screen.
+ *
+ * NOTE for anyone placing one of these inside a horizontally scrolling container: give
+ * that container `position: relative`. These are absolutely positioned, so without a
+ * positioned ancestor they resolve against the page — the sr-only column labels inside
+ * the wide transaction table pushed the DOCUMENT 68px past the viewport and gave the
+ * whole console a horizontal scrollbar at narrow widths.
+ */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/*
+ * Skip link. Four sidebar links sit before the content on every screen, so a keyboard
+ * user would otherwise tab through the whole nav on each navigation. Hidden until it
+ * takes focus, which is the first thing Tab reaches.
+ */
+.skip-link {
+  position: absolute;
+  left: 0.5rem;
+  top: -3rem;
+  z-index: 50;
+  padding: 0.5rem 0.75rem;
+  background: var(--color-raised);
+  color: var(--color-accent);
+  border: 1px solid var(--color-control-edge);
+  border-radius: var(--radius-md);
+  transition: top 120ms ease-out;
+}
+.skip-link:focus {
+  top: 0.5rem;
+}
+
+/* The one indeterminate-progress cue: a placeholder that is obviously not data. */
+@keyframes shimmer {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+.skeleton {
+  background: var(--color-sunken);
+  border-radius: var(--radius-sm);
+  animation: shimmer 1.4s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {

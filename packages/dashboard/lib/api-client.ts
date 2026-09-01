@@ -6,7 +6,7 @@
  * rather than localStorage, is the right store for a credential.
  */
 
-import { getApiKey, GATEWAY_URL } from './session';
+import { clearApiKey, getApiKey, notifyAuthFailure, GATEWAY_URL } from './session';
 
 export type ProtocolName = 'x402' | 'ap2' | 'fallback';
 export type PaymentStatus = 'pending' | 'awaiting_settlement' | 'settled' | 'failed' | 'rejected';
@@ -88,12 +88,38 @@ export function authHeaders(apiKey: string | null): Record<string, string> {
   return headers;
 }
 
+/**
+ * Thrown when the gateway could not be reached at all.
+ *
+ * Distinct from ApiError, which means the gateway answered and said no. The two need
+ * different words on screen: "the gateway is not running" is a different problem from
+ * "the gateway refused this", and telling an operator the wrong one sends them to debug
+ * the wrong thing.
+ */
+export class NetworkError extends Error {
+  /** Named `reason`, not `cause`: Error already defines `cause` and shadowing it needs
+      an override modifier for no benefit. */
+  readonly reason: unknown;
+
+  constructor(reason: unknown) {
+    super('Could not reach the gateway.');
+    this.name = 'NetworkError';
+    this.reason = reason;
+  }
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${GATEWAY_URL}${path}`, {
-    ...init,
-    headers: { ...authHeaders(getApiKey()), ...init.headers },
-    cache: 'no-store',
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${GATEWAY_URL}${path}`, {
+      ...init,
+      headers: { ...authHeaders(getApiKey()), ...init.headers },
+      cache: 'no-store',
+    });
+  } catch (cause) {
+    // fetch() rejects only for transport failures — gateway down, DNS, CORS, offline.
+    throw new NetworkError(cause);
+  }
 
   const body: unknown = await response.json().catch(() => null);
 
@@ -104,10 +130,38 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
         : typeof body === 'object' && body !== null && 'error' in body
           ? String((body as { error: unknown }).error)
           : `${init.method ?? 'GET'} ${path} failed`;
+
+    // A dead key is a session-level event, not this screen's problem. Drop it and tell
+    // the Shell, which puts the key gate back without a reload.
+    if (response.status === 401) {
+      clearApiKey();
+      notifyAuthFailure();
+    }
+
     throw new ApiError(response.status, body, detail);
   }
 
   return body as T;
+}
+
+/**
+ * Turns any thrown value into a sentence worth showing an operator.
+ *
+ * Centralised so every screen words the same failure identically — the console should
+ * not describe the same dead gateway three different ways depending on which tab is open.
+ */
+export function describeFailure(cause: unknown, fallback: string): string {
+  if (cause instanceof NetworkError) {
+    return `Could not reach the gateway at ${GATEWAY_URL}. Check that it is running, then try again.`;
+  }
+  if (cause instanceof ApiError) {
+    if (cause.isAuthFailure) return 'Your API key is no longer valid.';
+    if (cause.status >= 500) {
+      return 'The gateway failed to handle this request. Check its logs for the request id.';
+    }
+    return cause.message;
+  }
+  return cause instanceof Error ? cause.message : fallback;
 }
 
 export function getPolicy(): Promise<MerchantPolicy> {

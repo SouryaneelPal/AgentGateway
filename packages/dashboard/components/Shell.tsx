@@ -5,7 +5,7 @@ import type { ReactNode } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { applyTheme, readStoredTheme, systemTheme, type Theme } from '../lib/theme';
-import { clearApiKey, getApiKey, setApiKey } from '../lib/session';
+import { AUTH_FAILURE_EVENT, clearApiKey, getApiKey, setApiKey } from '../lib/session';
 import { Button } from './primitives';
 
 const NAV = [
@@ -35,7 +35,7 @@ function ThemeToggle() {
       aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
       className="t-micro border px-2 py-1"
       style={{
-        borderColor: 'var(--color-edge-strong)',
+        borderColor: 'var(--color-control-edge)',
         color: 'var(--color-ink-muted)',
         borderRadius: 'var(--radius-sm)',
       }}
@@ -51,7 +51,7 @@ function ThemeToggle() {
  * The operator pastes the key minted by `npm run merchant:create`. It is held in
  * sessionStorage, so it dies with the tab — see lib/session.ts.
  */
-function KeyGate({ onUnlock }: { onUnlock: () => void }) {
+function KeyGate({ onUnlock, expired }: { onUnlock: () => void; expired: boolean }) {
   const [value, setValue] = useState('');
 
   return (
@@ -59,11 +59,20 @@ function KeyGate({ onUnlock }: { onUnlock: () => void }) {
       <p className="t-micro" style={{ color: 'var(--color-accent)' }}>
         AgentGateway
       </p>
-      <h1 className="t-display mt-2">Merchant console</h1>
-      <p className="t-body mt-2" style={{ color: 'var(--color-ink-muted)' }}>
-        Paste the API key for your merchant account to continue. It is kept for this browser tab
-        only and is never written to disk.
-      </p>
+      <h1 className="t-display mt-2">{expired ? 'Session ended' : 'Merchant console'}</h1>
+
+      {expired ? (
+        <p className="t-body mt-2" style={{ color: 'var(--color-ink-muted)' }}>
+          The gateway stopped accepting your API key. That usually means it was revoked or rotated,
+          or the gateway restarted against a different database. Paste a current key to carry on —
+          you will come back to the page you were on.
+        </p>
+      ) : (
+        <p className="t-body mt-2" style={{ color: 'var(--color-ink-muted)' }}>
+          Paste the API key for your merchant account to continue. It is kept for this browser tab
+          only and is never written to disk.
+        </p>
+      )}
 
       <form
         className="mt-6"
@@ -87,7 +96,7 @@ function KeyGate({ onUnlock }: { onUnlock: () => void }) {
           className="tnum mt-1.5 w-full border px-3 py-2 text-sm"
           style={{
             background: 'var(--color-raised)',
-            borderColor: 'var(--color-edge-strong)',
+            borderColor: 'var(--color-control-edge)',
             color: 'var(--color-ink)',
             borderRadius: 'var(--radius-md)',
           }}
@@ -111,19 +120,54 @@ function KeyGate({ onUnlock }: { onUnlock: () => void }) {
 export function Shell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const [unlocked, setUnlocked] = useState<boolean | null>(null);
+  const [expired, setExpired] = useState(false);
 
   useEffect(() => {
     setUnlocked(getApiKey() !== null);
   }, []);
 
-  // Nothing renders until we know — avoids flashing the console to someone without a key.
-  if (unlocked === null) return null;
-  if (!unlocked) return <KeyGate onUnlock={() => setUnlocked(true)} />;
+  /**
+   * Mid-session key death, surfaced from anywhere (see lib/session.ts).
+   *
+   * Swapping `unlocked` back to false re-renders the gate over the current route rather
+   * than navigating, so once a new key is pasted the operator lands back on the screen
+   * they were already on.
+   */
+  useEffect(() => {
+    const onAuthFailure = () => {
+      setExpired(true);
+      setUnlocked(false);
+    };
+    window.addEventListener(AUTH_FAILURE_EVENT, onAuthFailure);
+    return () => window.removeEventListener(AUTH_FAILURE_EVENT, onAuthFailure);
+  }, []);
+
+  // Before the key check resolves, hold a matching ground rather than rendering nothing:
+  // returning null paints the browser's default white for a frame, which flashes hard in
+  // dark mode. min-h-screen on the themed background is the same pixel either way.
+  if (unlocked === null) {
+    return <div className="min-h-screen" style={{ background: 'var(--color-surface)' }} />;
+  }
+
+  if (!unlocked) {
+    return (
+      <KeyGate
+        expired={expired}
+        onUnlock={() => {
+          setExpired(false);
+          setUnlocked(true);
+        }}
+      />
+    );
+  }
 
   return (
     <div className="flex min-h-screen">
+      <a className="skip-link t-small" href="#main">
+        Skip to content
+      </a>
       <aside
-        className="flex w-56 shrink-0 flex-col border-r"
+        className="flex w-52 shrink-0 flex-col border-r lg:w-56"
         style={{ borderColor: 'var(--color-edge)', background: 'var(--color-raised)' }}
       >
         <div className="px-5 py-5">
@@ -133,13 +177,14 @@ export function Shell({ children }: { children: ReactNode }) {
           <p className="t-title mt-0.5">Console</p>
         </div>
 
-        <nav className="flex-1 px-2">
+        <nav aria-label="Console sections" className="flex-1 px-2">
           {NAV.map((item) => {
             const active = pathname === item.href;
             return (
               <Link
                 key={item.href}
                 href={item.href}
+                aria-current={active ? 'page' : undefined}
                 className="mb-0.5 block px-3 py-2 transition-colors"
                 style={{
                   background: active ? 'var(--color-accent-ground)' : 'transparent',
@@ -166,6 +211,7 @@ export function Shell({ children }: { children: ReactNode }) {
             type="button"
             onClick={() => {
               clearApiKey();
+              setExpired(false);
               setUnlocked(false);
             }}
             className="t-micro"
@@ -176,7 +222,9 @@ export function Shell({ children }: { children: ReactNode }) {
         </div>
       </aside>
 
-      <main className="min-w-0 flex-1 px-8 py-7">{children}</main>
+      <main id="main" className="min-w-0 flex-1 px-5 py-7 lg:px-8">
+        {children}
+      </main>
     </div>
   );
 }

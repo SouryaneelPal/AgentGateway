@@ -39,3 +39,21 @@ export function clearApiKey(): void {
     // Nothing to do — the key was never persisted.
   }
 }
+
+/**
+ * Broadcast when the gateway rejects the key mid-session (401): revoked, rotated, or the
+ * gateway restarted against a different database.
+ *
+ * A window event rather than React context on purpose. The failure can surface from any
+ * screen, from a background refresh, or from the SSE feed's fallback polling — all of
+ * which sit outside whatever component tree happens to be mounted. The Shell listens and
+ * swaps in the key gate in place, so recovery is pasting a new key rather than reloading
+ * the page (a reload would also discard the key still held for the tab, and the operator
+ * would lose their place).
+ */
+export const AUTH_FAILURE_EVENT = 'agentgateway:auth-failure';
+
+export function notifyAuthFailure(): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new Event(AUTH_FAILURE_EVENT));
+}
