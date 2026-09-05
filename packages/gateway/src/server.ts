@@ -19,6 +19,9 @@ import { isAllowedOrigin } from './config/cors.js';
 import { NotImplementedError, PolicyRejectionError } from './errors.js';
 import { healthRoutes } from './health/health.routes.js';
 import { x402Routes } from './routes/x402.routes.js';
+// The constant, not a string literal: the exposed header and the header the adapter
+// actually sets must never drift apart.
+import { X402_PAYMENT_REQUIRED_HEADER } from './adapters/x402.adapter.js';
 import { ap2Routes } from './routes/ap2.routes.js';
 import { fallbackRoutes } from './routes/fallback.routes.js';
 import { webhookRoutes } from './routes/webhooks.routes.js';
@@ -200,6 +203,33 @@ export async function buildServer(): Promise<FastifyInstance> {
       callback(null, false);
     },
     credentials: true,
+    /**
+     * Headers browser JavaScript is allowed to READ off a cross-origin response.
+     *
+     * Setting Access-Control-Allow-Origin is only half the job, and the missing half
+     * fails silently. CORS restricts a cross-origin reader to seven safelisted response
+     * headers (Cache-Control, Content-Language, Content-Length, Content-Type, Expires,
+     * Last-Modified, Pragma); every other header is stripped from `response.headers`
+     * before script sees it. The server still sends it, a proxy still logs it, and curl
+     * still shows it — so the header looks present from every angle except the one that
+     * matters.
+     *
+     * That is exactly how this surfaced: the console's live x402 run failed on
+     * `headers.get('payment-required')` returning null and reported "No PAYMENT-REQUIRED
+     * header returned", while the same request under curl showed the header intact.
+     * The protocol's entire challenge/response depends on the browser reading it.
+     *
+     * The rate-limit headers are listed for a related reason: the README documents them
+     * as part of a 429 response, and without exposure that promise silently excludes
+     * every browser caller.
+     */
+    exposedHeaders: [
+      X402_PAYMENT_REQUIRED_HEADER,
+      'retry-after',
+      'x-ratelimit-limit',
+      'x-ratelimit-remaining',
+      'x-ratelimit-reset',
+    ],
   });
 
   /**

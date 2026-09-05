@@ -61,3 +61,6 @@ packages/dashboard/CLAUDE.md
 # config. Regeneration is verified: Next recreates it from scratch on both dev and
 # build with no manual step. Scoped, like the rules above.
 packages/dashboard/next-env.d.ts
+
+# Recording cheat sheet — contains a live merchant API key. NEVER commit.
+video-recording-cheatsheet.md
