@@ -22,6 +22,31 @@ lives in **[ROADMAP.md](ROADMAP.md)**.
 
 ---
 
+## Demo
+
+**▶ [Watch the 5-minute walkthrough](https://youtu.be/ljVqI-19tEM)** — both protocols
+settling live, a spend-cap breach handled on camera, and the audit trail for that exact
+failure.
+
+[Jump to setup ↓](#setup)
+
+![Transactions feed with the decision trail for a refused payment expanded](docs/screenshots/tx-audit-light.png)
+
+_Every agent request, whichever protocol it arrived on, with the plain-language reason a
+payment was refused — readable without opening a log file._
+
+![Protocol tester showing the x402 and AP2 pipelines side by side](docs/screenshots/tester-final.png)
+
+_The same cart bought two different ways. Four identical stages, different proofs — and
+AP2 refused at Settle, so no Razorpay order was created and no receipt was issued._
+
+![Agents screen listing identities with spend against limit and a revoke control](docs/screenshots/agents-light.png)
+
+_Each agent identity with its spend against its cap. Revoking one takes effect on its very
+next request._
+
+---
+
 ## Architecture
 
 Reproduced from [WHITEPAPER.md](WHITEPAPER.md) §2.1.
